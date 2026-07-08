@@ -59,7 +59,7 @@ set -euo pipefail
 
 PREFIX="${1:-curriculum}"
 SEED="${SEED:-0}"
-STEPS_PER_STAGE="${STEPS_PER_STAGE:-100000}"
+STEPS_PER_STAGE="${STEPS_PER_STAGE:-10000000}"
 DEVICE="${DEVICE:-cuda}"
 CONTROL_FREQ="${CONTROL_FREQ:-50}"
 MAX_ACCEL_RAD_S2="${MAX_ACCEL_RAD_S2:-150}"
@@ -93,7 +93,7 @@ fi
 echo
 
 echo "=== Stage 1 (no DR) ==="
-python -u train_sac.py \
+python -u train_PPO_stable_baseline.py \
     --total-steps "$STEPS_PER_STAGE" \
     --device "$DEVICE" \
     --control-freq "$CONTROL_FREQ" \
@@ -103,7 +103,7 @@ python -u train_sac.py \
     --seed "$SEED"
 
 echo "=== Stage 2 (action-lag tau [${DR_LAG_TAU_MIN_S2}, ${DR_LAG_TAU_MAX_S2}] s) ==="
-python -u train_sac.py \
+python -u train_PPO_stable_baseline.py \
     --total-steps "$STEPS_PER_STAGE" \
     --device "$DEVICE" \
     --control-freq "$CONTROL_FREQ" \
@@ -112,12 +112,12 @@ python -u train_sac.py \
     --dr-action-lag-tau-min "$DR_LAG_TAU_MIN_S2" \
     --dr-action-lag-tau-max "$DR_LAG_TAU_MAX_S2" \
     "${EXTRA_REWARD_ARGS[@]}" \
-    --resume "runs/${run_stage1}/best_model.zip" \
+    --resume "runs/${run_stage1}/best_model" \
     --run-name "$run_stage2" \
     --seed "$SEED"
 
 echo "=== Stage 3 (action-lag tau [${DR_LAG_TAU_MIN_S3}, ${DR_LAG_TAU_MAX_S3}] s) ==="
-python -u train_sac.py \
+python -u train_PPO_stable_baseline.py \
     --total-steps "$STEPS_PER_STAGE" \
     --device "$DEVICE" \
     --control-freq "$CONTROL_FREQ" \
@@ -126,7 +126,7 @@ python -u train_sac.py \
     --dr-action-lag-tau-min "$DR_LAG_TAU_MIN_S3" \
     --dr-action-lag-tau-max "$DR_LAG_TAU_MAX_S3" \
     "${EXTRA_REWARD_ARGS[@]}" \
-    --resume "runs/${run_stage2}/best_model.zip" \
+    --resume "runs/${run_stage2}/best_model" \
     --run-name "$run_stage3" \
     --seed "$SEED"
 
