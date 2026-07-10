@@ -68,7 +68,7 @@ out = train(rng)
 # Save parameters
 # --------------------------------------------------
 
-params = out["runner_state"].params
+params = out["runner_state"][0].params
 
 
 import pickle
