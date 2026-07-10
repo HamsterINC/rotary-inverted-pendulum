@@ -59,8 +59,8 @@ set -euo pipefail
 
 PREFIX="${1:-curriculum}"
 SEED="${SEED:-0}"
-STEPS_PER_STAGE="${STEPS_PER_STAGE:-10000000}"
-DEVICE="${DEVICE:-cuda}"
+STEPS_PER_STAGE="${STEPS_PER_STAGE:-1500000}"
+DEVICE="${DEVICE:-cuda:4}"
 CONTROL_FREQ="${CONTROL_FREQ:-50}"
 MAX_ACCEL_RAD_S2="${MAX_ACCEL_RAD_S2:-150}"
 DR_LAG_TAU_MIN_S2="${DR_LAG_TAU_MIN_S2:-0.000}"
@@ -100,7 +100,8 @@ python -u train_PPO_stable_baseline.py \
     --max-accel-rad-s2 "$MAX_ACCEL_RAD_S2" \
     "${EXTRA_REWARD_ARGS[@]}" \
     --run-name "$run_stage1" \
-    --seed "$SEED"
+    --seed "$SEED" \
+    --progress-bar
 
 echo "=== Stage 2 (action-lag tau [${DR_LAG_TAU_MIN_S2}, ${DR_LAG_TAU_MAX_S2}] s) ==="
 python -u train_PPO_stable_baseline.py \

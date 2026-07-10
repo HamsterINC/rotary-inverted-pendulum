@@ -220,8 +220,10 @@ cython_debug/
 #.idea/
 
 # RL training artifacts
-RotaryInvertedPendulum-python/src/rl/runs/
+RotaryInvertedPendulum-python/src/rl/runs
 
+#Imported github
+RotaryInvertedPendulum-python/src/rl/purejaxrl
 # Sysid raw recordings (large binaries; the JSON fit is the artifact, not the raw stream)
 RotaryInvertedPendulum-python/src/rl/recordings/*.npz
 

@@ -446,10 +446,11 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         xml = build_mjcf(self.params)
         self.model = mujoco.MjModel.from_xml_string(xml)
-        self.data = mujoco.MjData(self.model)
+        # self.data = mujoco.MjData(self.model)
+        self.mj_model = mujoco.MjModel.from_xml_string(xml)
+        self.mjx_model = mjx.put_model(self.mj_model)
 
-        Path("model.xml").write_text(xml)
-        print("Saved model.xml")
+        self.mjx_data = mjx.put_data(self.mj_model, mujoco.MjData(self.mj_model))
 
         # Number of physics steps per control step.
         physics_dt = self.model.opt.timestep
@@ -695,7 +696,10 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self.data.ctrl[0] = self._motor_target
 
         for _ in range(n_sub):
-            mujoco.mj_step(self.model, self.data)
+            # mujoco.mj_step(self.model, self.data)
+            state = mjx.step(self.mjx_model, state)
+
+        obs = _obs(state)
 
         self._step_count += 1
 
@@ -718,7 +722,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
             "action_delay_steps": self._action_delay_steps,
             "action_lag_tau_s": self._action_lag_tau_s,
         }
-        return self._obs(), reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, info
 
     def render(self):
         if self.render_mode is None:
