@@ -18,17 +18,17 @@ from purejaxrl.purejaxrl.ppo_continuous_action import make_train
 config = {
 
     # environment
-    "NUM_ENVS": 1024,
-    "NUM_STEPS": 500,
+    "NUM_ENVS": 8192,
+    "NUM_STEPS": 280,
 
     # training
-    "TOTAL_TIMESTEPS": 10_000_000,
+    "TOTAL_TIMESTEPS": 200_000_000,
 
     "UPDATE_EPOCHS": 4,
-    "NUM_MINIBATCHES": 8,
+    "NUM_MINIBATCHES": 512,
 
     # PPO parameters
-    "LR": 3e-4,
+    "LR": 5e-4,
     "GAMMA": 0.99,
     "GAE_LAMBDA": 0.95,
 
@@ -42,6 +42,7 @@ config = {
     # network
     "ACTIVATION": "tanh",
     "ANNEAL_LR": True,
+    "DEBUG": True,
 
 }
 

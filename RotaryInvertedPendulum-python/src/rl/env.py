@@ -59,7 +59,7 @@ class EnvState:
     prev_action: jnp.ndarray
 
     step_count: jnp.ndarray
-
+    episode_return: jnp.ndarray  # running sum of reward within the current episode
 
 
 # ============================================================
@@ -169,7 +169,8 @@ def reset(
 
         step_count=jnp.array(
             0
-        )
+        ),
+        episode_return=jnp.array(0.0),
 
     )
 
@@ -266,6 +267,7 @@ def step(
     action,
     env_params=None
 ):
+
     action = jnp.squeeze(action)
     action = jnp.clip(
         action,
@@ -273,112 +275,74 @@ def step(
         1.0
     )
 
-
     acceleration = (
         action
         *
         MAX_ACCEL
     )
 
-
     velocity = jnp.clip(
-
         state.motor_velocity
         +
         acceleration / CONTROL_FREQ,
-
         -MAX_VEL,
-
         MAX_VEL
-
     )
 
-
     target = jnp.clip(
-
         state.motor_target
         +
         velocity / CONTROL_FREQ,
-
         -MOTOR_LIMIT,
-
         MOTOR_LIMIT
-
     )
-
 
     data = state.data.replace(
-
-        ctrl=jnp.array(
-            [target]
-        )
-
+        ctrl=jnp.array([target])
     )
 
+    data = physics_step(data)
 
-    data = physics_step(
-        data
-    )
-
-
-    new_state = EnvState(
-
+    stepped_state = EnvState(
         data=data,
-
         motor_target=target,
-
         motor_velocity=velocity,
-
         prev_action=action,
-
-        step_count=(
-            state.step_count + 1
-        )
-
+        step_count=state.step_count + 1,
+        episode_return=state.episode_return,  # updated just below
     )
 
+    reward = get_reward(stepped_state, action)
 
-    obs = get_obs(
-        new_state
-    )
+    new_episode_return = state.episode_return + reward
+    stepped_state = stepped_state.replace(episode_return=new_episode_return)
 
+    done = stepped_state.step_count >= EPISODE_LENGTH
 
-    reward = get_reward(
-        new_state,
-        action
-    )
+    # Auto-reset: if this episode just ended, swap in a fresh reset() state
+    # so the NEXT call to step() starts a brand-new episode instead of
+    # continuing to evolve the pendulum indefinitely past termination.
+    obs_reset, state_reset = reset(rng, env_params)
+    obs_stepped = get_obs(stepped_state)
 
+    def select(reset_val, stepped_val):
+        return jnp.where(done, reset_val, stepped_val)
 
-    done = (
-        new_state.step_count
-        >=
-        EPISODE_LENGTH
-    )
-
+    new_state = jax.tree_util.tree_map(select, state_reset, stepped_state)
+    obs = jax.tree_util.tree_map(select, obs_reset, obs_stepped)
 
     info = {
-
         "returned_episode": done,
-
-        "returned_episode_returns": reward,
-
-        "timestep": new_state.step_count,
-
+        "returned_episode_returns": new_episode_return,
+        "timestep": stepped_state.step_count,
     }
 
-
     return (
-
         obs,
-
         new_state,
-
         reward,
-
         done,
-
         info
-
     )
 
 

@@ -448,8 +448,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_string(xml)
         self.data = mujoco.MjData(self.model)
 
-        Path("model.xml").write_text(xml)
-        print("Saved model.xml")
+        # Path("model.xml").write_text(xml)
+        # print("Saved model.xml")
 
         # Number of physics steps per control step.
         physics_dt = self.model.opt.timestep
