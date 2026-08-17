@@ -1,0 +1,157 @@
+<?xml version="1.0" ?>
+<!-- Generated using onshape-to-robot -->
+<!-- Onshape https://cad.onshape.com/documents/e9b9528f42ea7f05035870b7/w/4a700c78264de3df2b7eef9d/e/b0ce0b1179539ce25c74b47e -->
+<robot name="rotary_pendulum">
+  <!-- Link base -->
+  <link name="base">
+    <inertial>
+      <origin xyz="-3.44626e-05 0.0581873 7.45844e-05" rpy="0 0 0"/>
+      <mass value="0.277405"/>
+      <inertia ixx="0.000161269" ixy="-4.16237e-07" ixz="-2.32084e-07" iyy="0.000153124" iyz="6.25815e-07" izz="0.000160092"/>
+    </inertial>
+    <!-- Part base -->
+    <visual>
+      <origin xyz="0 -0 0" rpy="-1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\base.stl"/>
+      </geometry>
+      <material name="base_material">
+        <color rgba="1 1 1 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 -0 0" rpy="-1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\base.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part sf2421_10b41 -->
+    <visual>
+      <origin xyz="0 0.07895 -9.79797e-05" rpy="-1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\sf2421_10b41.stl"/>
+      </geometry>
+      <material name="sf2421_10b41_material">
+        <color rgba="0.647059 0.647059 0.647059 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0.07895 -9.79797e-05" rpy="-1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\sf2421_10b41.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part motor_plate -->
+    <visual>
+      <origin xyz="0 0 -9.79797e-05" rpy="-1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\motor_plate.stl"/>
+      </geometry>
+      <material name="motor_plate_material">
+        <color rgba="1 1 1 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -9.79797e-05" rpy="-1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\motor_plate.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1 -->
+    <visual>
+      <origin xyz="-0 0.08 0" rpy="1.5708 0 3.14159"/>
+      <geometry>
+        <mesh filename="package://assets\part_1.stl"/>
+      </geometry>
+      <material name="part_1_material">
+        <color rgba="0.866667 0.321569 0.156863 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0 0.08 0" rpy="1.5708 0 3.14159"/>
+      <geometry>
+        <mesh filename="package://assets\part_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Link arm -->
+  <link name="arm">
+    <inertial>
+      <origin xyz="0.0388437 -0 0.00205584" rpy="0 0 0"/>
+      <mass value="0.0341342"/>
+      <inertia ixx="3.38482e-06" ixy="-0" ixz="-5.0191e-08" iyy="1.75545e-05" iyz="0" izz="1.75368e-05"/>
+    </inertial>
+    <!-- Part 608zz -->
+    <visual>
+      <origin xyz="0.111 -0 -0.012" rpy="0 -0 3.14159"/>
+      <geometry>
+        <mesh filename="package://assets\608zz.stl"/>
+      </geometry>
+      <material name="608zz_material">
+        <color rgba="0.8 0.8 0.8 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.111 -0 -0.012" rpy="0 -0 3.14159"/>
+      <geometry>
+        <mesh filename="package://assets\608zz.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part arm -->
+    <visual>
+      <origin xyz="0 0 0.016" rpy="-3.14159 0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\arm.stl"/>
+      </geometry>
+      <material name="arm_material">
+        <color rgba="1 1 1 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.016" rpy="-3.14159 0 -0"/>
+      <geometry>
+        <mesh filename="package://assets\arm.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Link pendulum -->
+  <link name="pendulum">
+    <inertial>
+      <origin xyz="-0 0.0516584 0.00576108" rpy="0 0 0"/>
+      <mass value="0.00747898"/>
+      <inertia ixx="4.13814e-06" ixy="0" ixz="0" iyy="2.76537e-07" iyz="-9.2305e-08" izz="4.36103e-06"/>
+    </inertial>
+    <!-- Part pendulum -->
+    <visual>
+      <origin xyz="0 0 0.006" rpy="-1.5708 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets\pendulum.stl"/>
+      </geometry>
+      <material name="pendulum_material">
+        <color rgba="0.498039 0.498039 0.498039 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.006" rpy="-1.5708 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets\pendulum.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Joint from arm to pendulum -->
+  <joint name="arm_to_pendulum" type="revolute">
+    <origin xyz="0.059 0 0.002" rpy="1.5708 0.0370451 1.5708"/>
+    <parent link="arm"/>
+    <child link="pendulum"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-3.141592653589793" upper="3.141592653589793"/>
+  </joint>
+  <!-- Joint from base to arm -->
+  <joint name="base_to_arm" type="revolute">
+    <origin xyz="-0 0.10295 -9.79797e-05" rpy="1.5708 1.5708 0"/>
+    <parent link="base"/>
+    <child link="arm"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-3.141592653589793" upper="3.141592653589793"/>
+  </joint>
+</robot>

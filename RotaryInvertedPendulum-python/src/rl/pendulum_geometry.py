@@ -25,7 +25,7 @@ from pathlib import Path
 # Repo layout:
 #   <repo>/RotaryInvertedPendulum-python/src/rl/pendulum_geometry.py
 #   <repo>/urdf/model.urdf
-URDF_PATH = Path(__file__).resolve().parents[3] / "urdf" / "model.urdf"
+URDF_PATH = Path(__file__).resolve().parents[3] / "urdf" / "robot.urdf"
 
 
 def _load_pendulum_geometry(urdf_path: Path) -> tuple[float, float, float]:
