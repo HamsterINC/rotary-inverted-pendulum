@@ -64,7 +64,12 @@ ARM_COM_M = 0.035
 GRAVITY = 9.81
 
 # AS5600 encoder resolution.
-PENDULUM_LSB_RAD = 2.0 * math.pi / 4096.0
+
+ENCODER_CPR = 2000
+PENDULUM_LSB_RAD = 2.0 * math.pi / ENCODER_CPR
+# Scaling constants (match these identically on your FPGA pipeline)
+MAX_PENDULUM_VEL_RAD_S = 30.0  # Typical max swing-up velocity
+# PENDULUM_LSB_RAD = 2.0 * math.pi / 4096.0
 
 # Pendulum mass / COM / I_com_swing come from `pendulum_geometry.py`,
 # which parses the URDF (single source of truth shared with Julia +
@@ -503,10 +508,19 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # document the expected scale. Last dim is prev_action ∈ [-1, 1]
         # — gives the policy an implicit read on its own command pipeline,
         # which restores Markov property under action delay (POMDP→MDP).
-        obs_high = np.array(
-            [MOTOR_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+
+        # Observation is now 5-dim: [motor_pos, theta_norm, motor_vel, pen_vel, prev_action]
+        # obs_high = np.array(
+        #     [MOTOR_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+        # )
+        # obs_high = np.array(
+        #             [MOTOR_LIMIT_RAD, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+        #         )
+        # self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
+
+        self.observation_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(5,), dtype=np.float32
         )
-        self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
         self._viewer = None
 
@@ -750,26 +764,26 @@ class RotaryInvertedPendulumEnv(gym.Env):
         pen_vel = float(self.data.qvel[self._pen_qvel_addr])
 
         if self.domain_randomization:
-            # Quantise pendulum angle to AS5600 LSB resolution.
+            # Quantize to 2000 CPR ticks
             phi = round(phi / PENDULUM_LSB_RAD) * PENDULUM_LSB_RAD
-            # Inject small position + velocity noise to mimic finite-diff jitter
-            # and encoder noise on real hardware.
             rng = self.np_random
             motor_pos += rng.normal(0.0, self._noise_std_pos)
             phi += rng.normal(0.0, self._noise_std_pos)
             motor_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
             pen_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
 
-        # Apply per-episode theta-bias to the OBSERVATION only. Physics and
-        # reward (which uses self._theta_upright() on raw qpos) are unbiased
-        # — the policy must learn to find true upright through a biased
-        # encoder reading. Bias is 0 in the non-DR / eval env.
         phi = phi + self._theta_bias_rad
-
         theta = _wrap_pi(phi - math.pi)
+
+        # --- Normalize all dims to [-1.0, 1.0] ---
+        motor_pos_norm = np.clip(motor_pos / MOTOR_SAFE_LIMIT_RAD, -1.0, 1.0)
+        theta_norm     = np.clip(theta / math.pi, -1.0, 1.0)
+        motor_vel_norm = np.clip(motor_vel / self.max_velocity_rad_s, -1.0, 1.0)
+        pen_vel_norm   = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
+        prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)
+
         return np.array(
-            [motor_pos, math.sin(theta), math.cos(theta), motor_vel, pen_vel,
-             self._prev_action],
+            [motor_pos_norm, theta_norm, motor_vel_norm, pen_vel_norm, prev_act_norm],
             dtype=np.float32,
         )
 
