@@ -36,6 +36,10 @@ import numpy as np
 from gymnasium import spaces
 
 from pendulum_geometry import (
+    ARM_COM_M,
+    ARM_I_COM_SPIN_KG_M2,
+    ARM_LENGTH_M,
+    ARM_MASS_KG,
     PENDULUM_COM_M,
     PENDULUM_I_COM_SWING_KG_M2,
     PENDULUM_MASS_KG,
@@ -57,10 +61,10 @@ MOTOR_SAFE_LIMIT_RAD = math.radians(125.0)
 # rebuild dropped the second bearing from the motor-shaft end). Total
 # arm mass 30 g; COM is measured at 35 mm from the motor shaft, slightly
 # past mid-arm because the remaining bearing sits at the pendulum end.
-ARM_LENGTH_M = 0.065
-ARM_MASS_KG = 0.030
-ARM_COM_M = 0.035
-
+# ARM_LENGTH_M = 0.065
+# ARM_MASS_KG = 0.030
+# ARM_COM_M = 0.035
+# ARM_I_COM_SPIN_KG_M2 = 8.06e-6  # Cross-validated against sysid free-swing period
 GRAVITY = 9.81
 
 # AS5600 encoder resolution.
@@ -232,7 +236,8 @@ def build_mjcf(p: PendulumParams) -> str:
     # rod than the previous "point masses at both ends" model; the rod
     # approximation m·L²/12 gives ~1.06e-5 kg·m² for the current 30 g /
     # 65 mm arm. Used for the MJCF body's diaginertia.
-    arm_I = ARM_MASS_KG * ARM_LENGTH_M ** 2 / 12.0
+    # arm_I = ARM_MASS_KG * ARM_LENGTH_M ** 2 / 12.0
+    arm_I = ARM_I_COM_SPIN_KG_M2
 
     # PD position-actuator gains. The motor joint sees the FULL effective
     # inertia (arm parallel-axis + pendulum mass at arm tip + pendulum
@@ -805,7 +810,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         sin_theta = math.sin(theta)
 
         # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
-        motor_pos_norm = np.clip(motor_pos / MOTOR_SAFE_LIMIT_RAD, -1.0, 1.0)
+        motor_pos_norm = np.clip(motor_pos, -1.0, 1.0)
         motor_vel_norm = np.clip(motor_vel / self.max_velocity_rad_s, -1.0, 1.0)
         pen_vel_norm   = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
         prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)

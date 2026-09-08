@@ -299,7 +299,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "(seconds). Continuous analogue of --dr-delay-max. "
                         "Set this to override env defaults. See "
                         "docs/transport_delay.md.")
-    p.add_argument("--control-freq", type=float, default=100.0,
+    p.add_argument("--control-freq", type=float, default=40.0,
                    help="sim control rate (Hz). Must match the rate used in "
                         "fine-tuning and deployment. 35 Hz is the empirically-best "
                         "operating point for this rig — see "
