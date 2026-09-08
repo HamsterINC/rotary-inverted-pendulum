@@ -20,7 +20,10 @@ import time
 from pathlib import Path
 
 import numpy as np
+import torch
+import torch.nn as nn
 from stable_baselines3 import PPO
+from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.callbacks import (
     CallbackList,
     CheckpointCallback,
@@ -35,6 +38,18 @@ from pendulum_env import RotaryInvertedPendulumEnv
 HERE = Path(__file__).resolve().parent
 RUNS_ROOT = HERE / "runs"
 
+class TanhActorCriticPolicy(ActorCriticPolicy):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _build(self, lr_schedule) -> None:
+        super()._build(lr_schedule)
+        # Wrap the default linear action_net with Tanh
+        self.action_net = nn.Sequential(
+            self.action_net,
+            nn.Tanh()
+        )
+
 
 def make_env(
     monitor_dir: Path | None = None,
@@ -44,7 +59,7 @@ def make_env(
     dr_action_delay_steps_range: tuple[int, int] | None = None,
     dr_action_lag_tau_range_s: tuple[float, float] | None = None,
     dr_control_dt_jitter_frac: float | None = None,
-    control_freq_hz: float = 35.0,
+    control_freq_hz: float = 100.0,
     max_accel_rad_s2: float = 150.0,
     max_velocity_rad_s: float | None = None,
     reward_action_rate_weight: float | None = None,
@@ -130,17 +145,25 @@ def train(args: argparse.Namespace) -> Path:
         print(f"Resuming from {args.resume}")
         model = PPO.load(args.resume, env=train_env, device=args.device)
     else:
+        policy_kwargs = dict(
+            activation_fn=nn.ReLU,
+            net_arch=dict(pi=[128, 128], vf=[128, 128]),  # Clean size for FPGA deployment
+            log_std_init=-1.0,                             # Lower initial exploration noise (std ~0.36)
+        )
         model = PPO(
-            "MlpPolicy",
-            train_env,
+            policy="MlpPolicy",
+            env=train_env,
             learning_rate=3e-4,
-            n_steps=4096,
+            n_steps=2048,
             batch_size=128,
-            gamma=0.99,
-            ent_coef=0.01,
-            gae_lambda=0.95,        # Factor for trade-off of bias vs variance in GAE
+            gamma=0.995,
+            gae_lambda=0.95,
+            ent_coef=0.001,
             clip_range=0.2,
-            n_epochs=10,
+            clip_range_vf=0.2,
+            n_epochs=5,
+            max_grad_norm=0.5,
+            policy_kwargs=policy_kwargs,
             verbose=1,
             tensorboard_log=str(run_dir / "tb"),
             seed=args.seed,
@@ -276,7 +299,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "(seconds). Continuous analogue of --dr-delay-max. "
                         "Set this to override env defaults. See "
                         "docs/transport_delay.md.")
-    p.add_argument("--control-freq", type=float, default=35.0,
+    p.add_argument("--control-freq", type=float, default=100.0,
                    help="sim control rate (Hz). Must match the rate used in "
                         "fine-tuning and deployment. 35 Hz is the empirically-best "
                         "operating point for this rig — see "
