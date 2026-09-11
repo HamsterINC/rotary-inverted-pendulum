@@ -3,8 +3,8 @@ import Jetson.GPIO as GPIO
 from JetsonPWM import JetsonPWM
 
 # --- GPIO Pin Mapping (Physical Board Pin Numbers) ---
-DIR_PIN = 31      # Board Pin 31 (GPIO 12)
-ENABLE_PIN = 29   # Board Pin 29 (GPIO 5)
+DIR_PIN = 16      # Board Pin 31 (GPIO 12)
+ENABLE_PIN = 22   # Board Pin 29 (GPIO 5)
 
 # --- Motor & Velocity Config ---
 STEPS_PER_RAD = 6400
