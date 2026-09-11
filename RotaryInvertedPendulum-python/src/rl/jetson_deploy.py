@@ -11,6 +11,7 @@ import Jetson.GPIO as GPIO
 import spidev
 import torch
 import torch.nn as nn
+from pwm_controller import HardwarePWMStep
 
 SB3_ZIP_PATH = "./Saved_runs/best_model0809.zip"
 
@@ -39,7 +40,7 @@ ACTION_SCALE_STEPS = 102
 # ==========================================
 # Pendulum Calibration Constants (SPI)
 # ==========================================
-PEND_ENCODER_RESOLUTION = 1000  # Counts per full revolution
+PEND_ENCODER_RESOLUTION = 16384 # Counts per full revolution
 PEND_LSB_RAD = (2.0 * math.pi) / PEND_ENCODER_RESOLUTION
 PEND_MAX_VEL_RAD_S = 30.0
 PEND_MAX_DELTA_TICKS = (PEND_MAX_VEL_RAD_S / PEND_LSB_RAD) * PERIOD  # ~47.7 ticks
@@ -99,24 +100,21 @@ EN_PIN = 22
 # Only one SPI bus for the pendulum encoder
 spi_pendulum = spidev.SpiDev()
 spi_pendulum.open(0, 0)  # CE0
-spi_pendulum.max_speed_hz = 500_000
-spi_pendulum.mode = 0
+spi_pendulum.max_speed_hz = 100_000
+spi_pendulum.mode = 1
+spi_pendulum.bits_per_word = 8
 
 
 def read_raw_ticks(spi_device, resolution: int) -> int:
     """Clocks 2 bytes over SPI and restricts to valid resolution space."""
-    data = spi_device.xfer2([0x00, 0x00])
+    spi_device.xfer2([0xFF, 0xFF])
+    data = spi_device.xfer2([0xC0, 0x00])
     raw = (data[0] << 8) | data[1]
-    return (raw & 0x0FFF) % resolution
+    return (raw & 0x3FFF)
 
 
-def pulse_stepper(steps: int, forward: bool):
-    """Pulses stepper without yielding thread to kernel scheduler."""
-    GPIO.output(DIR_PIN, GPIO.HIGH if forward else GPIO.LOW)
-    for _ in range(steps):
-        GPIO.output(STEP_PIN, GPIO.HIGH)
-        # Function execution overhead on Jetson GPIO provides >1 µs setup time
-        GPIO.output(STEP_PIN, GPIO.LOW)
+# Initialize Hardware PWM (Pin 32 corresponds to chip 0, channel 0 on most Jetsons)
+pwm_step = HardwarePWMStep(chip=0, channel=0)
 
 
 def process_encoder(
@@ -126,23 +124,14 @@ def process_encoder(
     resolution: int,
     max_delta_ticks: float,
 ):
-    half_res = resolution / 2.0
 
-    # 1. Zero-centered angle relative to calibrated offset
-    centered = (current_ticks - zero_offset_ticks) % resolution
-    if centered >= half_res:
-        centered -= resolution
 
-    norm_angle = centered / half_res
-    norm_angle = max(-1.0, min(1.0, norm_angle))
+    norm_angle = (current_ticks + 5000) / 8192
+    norm_angle = (norm_angle + 1.0) % 2.0 -1.0
     angle_rad = norm_angle * math.pi
 
     # 2. Delta with circular wrap-around correction
     delta = current_ticks - prev_ticks
-    if delta > half_res:
-        delta -= resolution
-    elif delta < -half_res:
-        delta += resolution
 
     # 3. Normalized angular velocity
     norm_vel = delta / max_delta_ticks
@@ -200,7 +189,7 @@ def cpu_control_loop():
                 max_delta_ticks=PEND_MAX_DELTA_TICKS,
             )
             prev_pend_ticks = pendulum_ticks
-
+            #print("Pendulum Count:", pendulum_ticks, "Angle (rad):", pendulum_rad, "Norm Vel:", norm_pendulum_velocity)
             # 3. Assemble observation vector:
             # [motor_pos_norm, cos(theta), sin(theta), motor_vel_norm, pen_vel_norm, prev_action]
             features = torch.tensor(
@@ -226,15 +215,20 @@ def cpu_control_loop():
 
             # Clamp commanded steps so arm never exceeds physical safety limit
             clamped_pos_steps = max(-ARM_MAX_SAFE_STEPS, min(ARM_MAX_SAFE_STEPS, target_pos_steps))
-            actual_steps_to_move = clamped_pos_steps - arm_current_steps
-
-            # 6. Pulse Stepper & Update Step Tracker
-            if actual_steps_to_move != 0:
-                is_forward = actual_steps_to_move > 0
-                step_count = abs(actual_steps_to_move)
+            actual_steps = clamped_pos_steps - arm_current_steps
+            #print("Actual Steps:", actual_steps)
+            # 5. Output via Hardware PWM
+            if actual_steps != 0:
+                is_forward = actual_steps > 0
+                GPIO.output(DIR_PIN, GPIO.HIGH if is_forward else GPIO.LOW)
                 
-                pulse_stepper(steps=step_count, forward=is_forward)
-                arm_current_steps += actual_steps_to_move
+                # Frequency to deliver 'actual_steps' over PERIOD (0.025s)
+                freq = abs(actual_steps) / PERIOD  # e.g., 50 steps / 0.025s = 2000 Hz
+                pwm_step.set_frequency(freq)
+                
+                arm_current_steps += actual_steps
+            else:
+                pwm_step.stop()
 
             # 7. Maintain strict 100 Hz cycle
             next_tick += PERIOD
@@ -243,6 +237,9 @@ def cpu_control_loop():
                 time.sleep(sleep_time)
             else:
                 next_tick = time.perf_counter()
+
+    pwm_step.stop()
+    pwm_step.close()
 
 
 if __name__ == "__main__":

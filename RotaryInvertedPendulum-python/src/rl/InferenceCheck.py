@@ -29,14 +29,18 @@ def saturate_and_shift_tensor(accumulated_32bit):
     shifted = torch.bitwise_right_shift(accumulated_32bit, 8)
     return torch.clamp(shifted, -32768, 32767)
 
+def q8_8_relu(tensor):
+    """Fixed-point ReLU: zeros out negative values, leaves positive Q8.8 values unchanged."""
+    return torch.clamp_min(tensor, 0)
+
 # =========================================================================
 # 2. Define Inputs & Network Tensors (6-128-128-1)
 # =========================================================================
 # 6 input activations scaled to Q8.8 format
-input_features = float_to_q8_8([-128.0, 0.5, -0.00390625, -128.0, 0.0, 0.0])
+input_features = float_to_q8_8([-0.00390625,-0.0078125, 0.49609375 , 0.0, 0.0, 1.046875])
 
 try:
-    zip_path = "runs/ppo_2026-08-31_1339/best_model.zip"
+    zip_path = "runs/ppo_2026-09-08_1707/best_model.zip"
 
     with zipfile.ZipFile(zip_path, 'r') as archive:
         with archive.open('policy.pth') as f:
@@ -82,7 +86,8 @@ def run_pytorch_mlp_inference(critic_mode=False):
     # --- LAYER 1: (128, 6) @ (6,) -> (128,) ---
     l1_dot = torch.mv(w1, input_features)
     l1_acc = l1_dot + (b1 * 256)
-    layer1_out = saturate_and_shift_tensor(l1_acc)
+    layer1_saturated = saturate_and_shift_tensor(l1_acc)
+    layer1_out = q8_8_relu(layer1_saturated)
 
     print("\n--- Layer 1 Output Sample (First 5 Neurons) ---")
     for i in range(min(5, len(layer1_out))):
@@ -92,21 +97,23 @@ def run_pytorch_mlp_inference(critic_mode=False):
     # --- LAYER 2: (128, 128) @ (128,) -> (128,) ---
     l2_dot = torch.mv(w2, layer1_out)
     l2_acc = l2_dot + (b2 * 256)
-    layer2_out = saturate_and_shift_tensor(l2_acc)
+    layer2_saturated = saturate_and_shift_tensor(l2_acc)
+    layer2_out = q8_8_relu(layer2_saturated)
 
     print("\n--- Layer 2 Output Sample (First 5 Neurons) ---")
     for i in range(min(5, len(layer2_out))):
         val = int(layer2_out[i].item())
         print(f"Layer 2 Index {i} in Hex: {val & 0xFFFF:04x}")
 
-    # --- LAYER 3: (1, 128) @ (128,) -> (1,) ---
+    # --- LAYER 3: (1, 128) @ (128,) -> (1,) (Linear / No ReLU) ---
     w3_selected = w3_critic if critic_mode else w3_actor
     b3_selected = b3_critic if critic_mode else b3_actor
 
     l3_dot = torch.mv(w3_selected, layer2_out)
     l3_acc = l3_dot + (b3_selected * 256)
 
-    final_q_val = saturate_and_shift_tensor(l3_acc)
+    l3_out = saturate_and_shift_tensor(l3_acc)
+    final_q_val = q8_8_relu(l3_out)
     return final_q_val.item()
 
 # =========================================================================
