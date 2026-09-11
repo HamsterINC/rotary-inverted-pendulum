@@ -85,6 +85,10 @@ class JetsonPWM:
             self._write_sysfs("period", new_period_ns)
             self._write_sysfs("duty_cycle", new_duty_ns)
             self.current_period_ns = self._read_int("period", default=new_period_ns)
+    def pause(self):
+        """Sets duty cycle to 0 to halt pulse generation without tearing down sysfs."""
+        if self.is_enabled:
+            self._write_sysfs("duty_cycle", 0)
 
     def stop(self):
         """Disables output and releases the channel."""
