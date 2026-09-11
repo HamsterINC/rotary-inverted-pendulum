@@ -9,18 +9,15 @@ class JetsonPWM:
         
         self._export_pwm()
         
-        # Keep file descriptors open for low latency updates
-        self._period_fd = open(f"{self.pwm_path}/period", "r+")
-        self._duty_fd = open(f"{self.pwm_path}/duty_cycle", "r+")
-        self._enable_fd = open(f"{self.pwm_path}/enable", "w")
+        # Open raw file descriptors (O_RDWR / O_WRONLY) without Python buffering
+        self._period_fd = os.open(f"{self.pwm_path}/period", os.O_RDWR)
+        self._duty_fd = os.open(f"{self.pwm_path}/duty_cycle", os.O_RDWR)
+        self._enable_fd = os.open(f"{self.pwm_path}/enable", os.O_WRONLY)
 
-        # Read the current period from sysfs or initialize default
-        try:
-            self._period_fd.seek(0)
-            raw = self._period_fd.read().strip()
-            self.current_period_ns = int(raw) if raw else 10_000_000
-        except (ValueError, IOError):
-            self.current_period_ns = 10_000_000
+        # Read the current hardware period
+        os.lseek(self._period_fd, 0, os.SEEK_SET)
+        raw = os.read(self._period_fd, 32).decode().strip()
+        self.current_period_ns = int(raw) if raw else 10_000_000
 
         self.is_enabled = False
 
@@ -30,79 +27,68 @@ class JetsonPWM:
                 f.write(str(self.channel))
             time.sleep(0.1)
 
+    def _write_fd(self, fd, val_str):
+        """Rewinds, truncates, and directly writes to sysfs without buffer residue."""
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{val_str}\n".encode())
+
     def start(self, initial_freq_hz=100):
-        """Configures initial frequency, sets 50% duty cycle, and enables output."""
+        """Initializes duty and period safely with output disabled, then enables."""
         period_ns = int(1_000_000_000 / initial_freq_hz)
-        duty_ns = period_ns // 2
+        duty_ns = (period_ns // 2) - 100  # -100ns margin prevents hardware rounding race
 
-        # Safe initial write while disabled
-        self._enable_fd.seek(0)
-        self._enable_fd.write("0\n")
-        self._enable_fd.flush()
+        # Disable first to set initial baseline cleanly
+        self._write_fd(self._enable_fd, "0")
+        self._write_fd(self._period_fd, str(period_ns))
+        self._write_fd(self._duty_fd, str(duty_ns))
 
-        self._period_fd.seek(0)
-        self._period_fd.write(f"{period_ns}\n")
-        self._period_fd.flush()
+        # Re-read actual period assigned by hardware clock ticks
+        os.lseek(self._period_fd, 0, os.SEEK_SET)
+        actual = os.read(self._period_fd, 32).decode().strip()
+        self.current_period_ns = int(actual)
 
-        self._duty_fd.seek(0)
-        self._duty_fd.write(f"{duty_ns}\n")
-        self._duty_fd.flush()
-
-        self.current_period_ns = period_ns
-
-        # Turn ON
-        self._enable_fd.seek(0)
-        self._enable_fd.write("1\n")
-        self._enable_fd.flush()
+        # Enable
+        self._write_fd(self._enable_fd, "1")
         self.is_enabled = True
 
     def change_frequency(self, freq_hz):
         """
-        Dynamically updates the output frequency while remaining enabled.
-        Enforces: duty_cycle <= period at all times to prevent EINVAL.
+        Dynamically updates the frequency without disabling output.
+        Enforces duty_cycle <= period ordering using low-level OS writes.
         """
         if not self.is_enabled:
             self.start(freq_hz)
             return
 
         new_period_ns = int(1_000_000_000 / freq_hz)
-        new_duty_ns = new_period_ns // 2
+        # 100ns safety buffer avoids kernel rejection if period snaps down slightly
+        new_duty_ns = max(1, (new_period_ns // 2) - 100)
 
         if new_period_ns < self.current_period_ns:
-            # Frequency increasing: shrink duty_cycle first
-            self._duty_fd.seek(0)
-            self._duty_fd.write(f"{new_duty_ns}\n")
-            self._duty_fd.flush()
-
-            self._period_fd.seek(0)
-            self._period_fd.write(f"{new_period_ns}\n")
-            self._period_fd.flush()
+            # Frequency increasing: period shrinks -> duty_cycle MUST drop first
+            self._write_fd(self._duty_fd, str(new_duty_ns))
+            self._write_fd(self._period_fd, str(new_period_ns))
         else:
-            # Frequency decreasing: expand period first
-            self._period_fd.seek(0)
-            self._period_fd.write(f"{new_period_ns}\n")
-            self._period_fd.flush()
-
-            self._duty_fd.seek(0)
-            self._duty_fd.write(f"{new_duty_ns}\n")
-            self._duty_fd.flush()
+            # Frequency decreasing: period expands -> period MUST expand first
+            self._write_fd(self._period_fd, str(new_period_ns))
+            self._write_fd(self._duty_fd, str(new_duty_ns))
 
         self.current_period_ns = new_period_ns
 
     def stop(self):
-        """Disables output and releases file descriptors."""
+        """Disables channel and unexports."""
         try:
-            self._enable_fd.seek(0)
-            self._enable_fd.write("0\n")
-            self._enable_fd.flush()
+            self._write_fd(self._enable_fd, "0")
         except Exception:
             pass
 
-        self._period_fd.close()
-        self._duty_fd.close()
-        self._enable_fd.close()
+        try:
+            os.close(self._period_fd)
+            os.close(self._duty_fd)
+            os.close(self._enable_fd)
+        except Exception:
+            pass
 
-        # Unexport
         try:
             with open(f"{self.chip_path}/unexport", "w") as f:
                 f.write(str(self.channel))
