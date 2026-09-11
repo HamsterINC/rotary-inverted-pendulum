@@ -287,7 +287,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--dr-accel-max", type=float, default=None,
                    help="upper bound on motor_max_accel_rad_s2. Set this to "
                         "override env defaults.")
-    p.add_argument("--dr-delay-min", type=int, default=0,
+    p.add_argument("--dr-delay-min", type=int, default=0.030,
                    help="lower bound on action_delay_steps sampled per episode")
     p.add_argument("--dr-delay-max", type=int, default=None,
                    help="upper bound on action_delay_steps. Set this to override env defaults.")
