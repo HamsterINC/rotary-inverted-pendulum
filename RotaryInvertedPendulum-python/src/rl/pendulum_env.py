@@ -687,58 +687,58 @@ class RotaryInvertedPendulumEnv(gym.Env):
             n_sub = self._n_substeps
         actual_dt_s = n_sub * self.model.opt.timestep
 
-        # # --- Accel-mode integration: action → accel → velocity (capped) → pos target. ---
-        # # Mirrors FastAccelStepper's moveByAcceleration() behaviour. The
-        # # per-episode envelope clamp models the stepper's torque-limited
-        # # accel ceiling under varying load.
-        # accel_cmd = delayed_action * self.max_accel_rad_s2
-        # accel_cmd = float(np.clip(accel_cmd,
-        #                            -self._motor_max_accel_rad_s2,
-        #                            self._motor_max_accel_rad_s2))
-        # self._motor_vel = float(np.clip(
-        #     self._motor_vel + accel_cmd * actual_dt_s,
-        #     -self.max_velocity_rad_s,
-        #     self.max_velocity_rad_s,
-        # ))
-        # # Safety: zero velocity if we're at the safety rail and pushing outward.
-        # # Mirrors the firmware-side clamp on the real rig.
-        # if self._motor_target >= MOTOR_SAFE_LIMIT_RAD and self._motor_vel > 0.0:
-        #     self._motor_vel = 0.0
-        # elif self._motor_target <= -MOTOR_SAFE_LIMIT_RAD and self._motor_vel < 0.0:
-        #     self._motor_vel = 0.0
-        # self._motor_target = float(np.clip(
-        #     self._motor_target + self._motor_vel * actual_dt_s,
-        #     -MOTOR_SAFE_LIMIT_RAD,
-        #     MOTOR_SAFE_LIMIT_RAD,
-        # ))
-        # self.data.ctrl[0] = self._motor_target
-
-        # for _ in range(n_sub):
-        #     mujoco.mj_step(self.model, self.data)
-
-        delta_pos_rad = delayed_action * (self.max_velocity_rad_s * actual_dt_s)
-
-        # -------------------------------------------------------------
-        # 2. Update Target Position Directly
-        # -------------------------------------------------------------
-        new_target = self._motor_target + delta_pos_rad
-
-        # -------------------------------------------------------------
-        # 3. Soft Safety Rail Clamping
-        # -------------------------------------------------------------
+        # --- Accel-mode integration: action → accel → velocity (capped) → pos target. ---
+        # Mirrors FastAccelStepper's moveByAcceleration() behaviour. The
+        # per-episode envelope clamp models the stepper's torque-limited
+        # accel ceiling under varying load.
+        accel_cmd = delayed_action * self.max_accel_rad_s2
+        accel_cmd = float(np.clip(accel_cmd,
+                                   -self._motor_max_accel_rad_s2,
+                                   self._motor_max_accel_rad_s2))
+        self._motor_vel = float(np.clip(
+            self._motor_vel + accel_cmd * actual_dt_s,
+            -self.max_velocity_rad_s,
+            self.max_velocity_rad_s,
+        ))
+        # Safety: zero velocity if we're at the safety rail and pushing outward.
+        # Mirrors the firmware-side clamp on the real rig.
+        if self._motor_target >= MOTOR_SAFE_LIMIT_RAD and self._motor_vel > 0.0:
+            self._motor_vel = 0.0
+        elif self._motor_target <= -MOTOR_SAFE_LIMIT_RAD and self._motor_vel < 0.0:
+            self._motor_vel = 0.0
         self._motor_target = float(np.clip(
-            new_target,
+            self._motor_target + self._motor_vel * actual_dt_s,
             -MOTOR_SAFE_LIMIT_RAD,
             MOTOR_SAFE_LIMIT_RAD,
         ))
-
-        # -------------------------------------------------------------
-        # 4. Actuate in MuJoCo
-        # -------------------------------------------------------------
         self.data.ctrl[0] = self._motor_target
 
         for _ in range(n_sub):
             mujoco.mj_step(self.model, self.data)
+
+        # delta_pos_rad = delayed_action * (self.max_velocity_rad_s * actual_dt_s)
+
+        # # -------------------------------------------------------------
+        # # 2. Update Target Position Directly
+        # # -------------------------------------------------------------
+        # new_target = self._motor_target + delta_pos_rad
+
+        # # -------------------------------------------------------------
+        # # 3. Soft Safety Rail Clamping
+        # # -------------------------------------------------------------
+        # self._motor_target = float(np.clip(
+        #     new_target,
+        #     -MOTOR_SAFE_LIMIT_RAD,
+        #     MOTOR_SAFE_LIMIT_RAD,
+        # ))
+
+        # # -------------------------------------------------------------
+        # # 4. Actuate in MuJoCo
+        # # -------------------------------------------------------------
+        # self.data.ctrl[0] = self._motor_target
+
+        # for _ in range(n_sub):
+        #     mujoco.mj_step(self.model, self.data)
 
 
         self._step_count += 1
