@@ -18,10 +18,11 @@ from JetsonPWM import JetsonPWM
 SB3_ZIP_PATH = "./Saved_runs/1509.zip"
 
 # ==========================================
-# Timing Constants (40 Hz Canonical Cycle)
+# Timing Constants
 # ==========================================
 TARGET_HZ = 40.0
 PERIOD = 1.0 / TARGET_HZ  # 0.025 s
+
 
 # ==========================================
 # Stepper / Arm Step-Tracking Constants
@@ -127,30 +128,51 @@ def process_encoder(current_ticks: int, prev_ticks: int):
     return angle_rad, norm_vel, norm_angle
 
 # ==========================================
-# 4. Control Loop (Matches Sim Step Logic)
+# 4. Multi-rate Control
+#
+# 40 Hz:  NN inference -> acceleration command
+# 100 Hz: acceleration -> velocity -> position -> PWM
 # ==========================================
+CONTROL_HZ = 40.0
+CONTROL_PERIOD = 1.0 / CONTROL_HZ
+
+STEP_UPDATE_HZ = 100.0
+STEP_UPDATE_PERIOD = 1.0 / STEP_UPDATE_HZ
+
 stop_event = threading.Event()
 
+# Shared state between the two threads.
+state_lock = threading.Lock()
+
+# The 40 Hz thread writes this.
+# The 100 Hz thread reads it every 10 ms.
+shared_accel_cmd = 0.0
+
+# The 100 Hz thread owns these kinematic states.
+arm_current_steps = 0
+motor_vel_rad_s = 0.0
+motor_target_rad = 0.0
+
+
 def cpu_control_loop(model: nn.Module):
-    pwm_step = JetsonPWM(chip=0, channel=0)
-    pwm_step.start(initial_freq_hz=PWM_MIN_FREQ_HZ)
+    """
+    40 Hz thread.
 
-    arm_current_steps = 0
+    The neural network produces an acceleration command.
+    It does NOT integrate velocity or position.
+    """
+    global shared_accel_cmd
+
     prev_arm_steps = 0
-
-    # Sim kinematic states
-    motor_vel_rad_s = 0.0
-    motor_target_rad = 0.0
-
     prev_pend_ticks = read_raw_ticks(spi_pendulum)
     action = 0.0
 
-    print(f"[CPU Thread] Starting 40 Hz control loop.")
+    print("[CPU Thread] Starting 40 Hz NN loop.")
 
     with torch.no_grad():
         t_start_session = time.perf_counter()
         last_loop_time = t_start_session
-        next_tick = last_loop_time
+        next_tick = t_start_session
 
         while not stop_event.is_set():
             loop_start = time.perf_counter()
@@ -158,106 +180,295 @@ def cpu_control_loop(model: nn.Module):
             last_loop_time = loop_start
 
             if actual_dt_s <= 0.0:
-                actual_dt_s = PERIOD
+                actual_dt_s = CONTROL_PERIOD
 
-            # 1. Arm Observations
-            arm_delta_steps = arm_current_steps - prev_arm_steps
-            prev_arm_steps = arm_current_steps
+            # Snapshot actual arm position from the 100 Hz thread.
+            with state_lock:
+                observed_arm_steps = arm_current_steps
 
-            norm_arm_pos = arm_current_steps / float(STEPS_PER_REV / 2)
+            # 1. Arm observations
+            arm_delta_steps = observed_arm_steps - prev_arm_steps
+            prev_arm_steps = observed_arm_steps
+
+            norm_arm_pos = observed_arm_steps / float(STEPS_PER_REV / 2)
             norm_arm_pos = max(-1.0, min(1.0, norm_arm_pos))
 
+            # This is still the 40 Hz observation velocity used by the NN.
             norm_arm_vel = arm_delta_steps / float(ARM_MAX_DELTA_STEPS)
             norm_arm_vel = max(-1.0, min(1.0, norm_arm_vel))
 
-            # Actual physical arm velocity (rad/s) computed from step delta
-            physical_arm_vel_rad_s = (arm_delta_steps * ARM_RAD_PER_STEP) / actual_dt_s
-            arm_pos_rad = arm_current_steps * ARM_RAD_PER_STEP
+            physical_arm_vel_rad_s = (
+                arm_delta_steps * ARM_RAD_PER_STEP
+            ) / actual_dt_s
 
-            # 2. Pendulum Observations
+            arm_pos_rad = observed_arm_steps * ARM_RAD_PER_STEP
+
+            # 2. Pendulum observations
             pend_ticks = read_raw_ticks(spi_pendulum)
-            pend_rad, norm_pend_vel, norm_angle_pend = process_encoder(pend_ticks, prev_pend_ticks)
+            pend_rad, norm_pend_vel, norm_angle_pend = process_encoder(
+                pend_ticks,
+                prev_pend_ticks,
+            )
             prev_pend_ticks = pend_ticks
 
-            print(f"Pend Pos: {norm_angle_pend:.4f} rad | Pend Vel: {norm_pend_vel:.4f} (norm)")
+            print(
+                f"Pend Pos: {norm_angle_pend:.4f} rad | "
+                f"Pend Vel: {norm_pend_vel:.4f} (norm)"
+            )
 
-            # 3. Observation Tensor
+            # 3. Observation tensor
             features = torch.tensor(
                 [[
                     norm_arm_pos,
                     math.cos(pend_rad),
                     math.sin(pend_rad),
                     norm_arm_vel,
-                    norm_pend_vel,
+                    -norm_pend_vel,
                     action,
                 ]],
                 dtype=torch.float32,
                 device="cpu",
             )
 
-            # 4. Inference
+            # 4. NN inference
             action = float(model(features).item())
             action = max(-1.0, min(1.0, action))
 
-            # 5. Exact Sim Kinematics Match:
+            # 5. NN action -> acceleration.
+            #
+            # IMPORTANT:
+            # No velocity or position integration happens here.
+            # This acceleration is held until the next NN update.
             accel_cmd = action * MAX_ACCEL_RAD_S2
-            accel_cmd = max(-MAX_ACCEL_RAD_S2, min(MAX_ACCEL_RAD_S2, accel_cmd))
-
-            # Update commanded velocity
-            motor_vel_rad_s = max(
-                -MAX_VELOCITY_RAD_S,
-                min(MAX_VELOCITY_RAD_S, motor_vel_rad_s + accel_cmd * actual_dt_s)
+            accel_cmd = max(
+                -MAX_ACCEL_RAD_S2,
+                min(MAX_ACCEL_RAD_S2, accel_cmd),
             )
 
-            # Outward boundary clamp
-            if motor_target_rad >= ARM_SAFE_LIMIT_RAD and motor_vel_rad_s > 0.0:
-                motor_vel_rad_s = 0.0
-            elif motor_target_rad <= -ARM_SAFE_LIMIT_RAD and motor_vel_rad_s < 0.0:
-                motor_vel_rad_s = 0.0
+            with state_lock:
+                shared_accel_cmd = accel_cmd
 
-            # Direct forward-Euler position integration (identical to sim)
-            motor_target_rad = max(
-                -ARM_SAFE_LIMIT_RAD,
-                min(ARM_SAFE_LIMIT_RAD, motor_target_rad + motor_vel_rad_s * actual_dt_s)
-            )
-
-            # 6. Actuation to Pulse Hardware
-            target_pos_steps = int(round(motor_target_rad / ARM_RAD_PER_STEP))
-            target_pos_steps = max(-ARM_MAX_SAFE_STEPS, min(ARM_MAX_SAFE_STEPS, target_pos_steps))
-
-            actual_steps = target_pos_steps - arm_current_steps
-
-            if actual_steps != 0:
-                is_forward = actual_steps > 0
-                GPIO.output(DIR_PIN, GPIO.HIGH if is_forward else GPIO.LOW)
-
-                freq = abs(actual_steps) / PERIOD
-                freq = max(PWM_MIN_FREQ_HZ, freq)
-
-                pwm_step.change_frequency(freq)
-                arm_current_steps += actual_steps
-            else:
-                pwm_step.pause()
-
-            # 7. Record Telemetry (In-Memory Buffer)
+            # 6. Telemetry
             log_buffer.append({
-                "timestamp_s": round(loop_start - t_start_session, 5),
-                "arm_pos_rad": round(norm_arm_pos, 4),
-                "arm_actual_vel_rad_s": round(physical_arm_vel_rad_s, 4),
-                "pendulum_pos_rad": round(norm_angle_pend, 4),
-                "pendulum_vel_rad_s": round(norm_pend_vel, 4),
+                "timestamp_s": round(
+                    loop_start - t_start_session,
+                    5,
+                ),
+                "arm_pos_rad": round(arm_pos_rad, 4),
+                "arm_actual_vel_rad_s": round(
+                    physical_arm_vel_rad_s,
+                    4,
+                ),
+                "pendulum_pos_rad": round(
+                    norm_angle_pend,
+                    4,
+                ),
+                "pendulum_vel_rad_s": round(
+                    norm_pend_vel,
+                    4,
+                ),
                 "action_cmd": round(action, 4),
+                "acceleration_cmd_rad_s2": round(accel_cmd, 4),
             })
 
-            # 8. Governor
-            next_tick += PERIOD
+            # 7. 40 Hz timing
+            next_tick += CONTROL_PERIOD
             sleep_time = next_tick - time.perf_counter()
+
             if sleep_time > 0:
                 time.sleep(sleep_time)
             else:
                 next_tick = time.perf_counter()
 
-    pwm_step.stop()
+
+def step_update_loop():
+    """
+    100 Hz thread.
+
+    Every 10 ms:
+        acceleration -> velocity -> position -> target steps -> PWM
+
+    The acceleration command is supplied by the 40 Hz NN thread.
+    """
+    global arm_current_steps
+    global motor_vel_rad_s
+    global motor_target_rad
+
+    pwm_step = JetsonPWM(chip=0, channel=0)
+    pwm_step.start(initial_freq_hz=PWM_MIN_FREQ_HZ)
+
+    print("[Step Thread] Starting 100 Hz kinematics/PWM loop.")
+
+    next_tick = time.perf_counter()
+
+    try:
+        while not stop_event.is_set():
+            # ------------------------------------------------------
+            # 1. Read the most recent acceleration from the NN.
+            # ------------------------------------------------------
+            with state_lock:
+                accel_cmd = shared_accel_cmd
+                current_steps = arm_current_steps
+
+            dt = STEP_UPDATE_PERIOD
+
+            # ------------------------------------------------------
+            # 2. ACCELERATION -> VELOCITY
+            #
+            # This happens every 10 ms, independently of NN timing.
+            # ------------------------------------------------------
+            motor_vel_rad_s += accel_cmd * dt
+
+            motor_vel_rad_s = max(
+                -MAX_VELOCITY_RAD_S,
+                min(
+                    MAX_VELOCITY_RAD_S,
+                    motor_vel_rad_s,
+                ),
+            )
+
+            # ------------------------------------------------------
+            # 3. Boundary handling.
+            #
+            # Stop velocity if we are at a safety limit and still
+            # trying to move farther outward.
+            # ------------------------------------------------------
+            if (
+                motor_target_rad >= ARM_SAFE_LIMIT_RAD
+                and motor_vel_rad_s > 0.0
+            ):
+                motor_vel_rad_s = 0.0
+                motor_target_rad = ARM_SAFE_LIMIT_RAD
+
+            elif (
+                motor_target_rad <= -ARM_SAFE_LIMIT_RAD
+                and motor_vel_rad_s < 0.0
+            ):
+                motor_vel_rad_s = 0.0
+                motor_target_rad = -ARM_SAFE_LIMIT_RAD
+
+            # ------------------------------------------------------
+            # 4. VELOCITY -> POSITION
+            #
+            # Also happens every 10 ms.
+            # ------------------------------------------------------
+            motor_target_rad += motor_vel_rad_s * dt
+
+            motor_target_rad = max(
+                -ARM_SAFE_LIMIT_RAD,
+                min(
+                    ARM_SAFE_LIMIT_RAD,
+                    motor_target_rad,
+                ),
+            )
+
+            # ------------------------------------------------------
+            # 5. POSITION -> TARGET STEPS
+            # ------------------------------------------------------
+            target_pos_steps = int(
+                round(
+                    motor_target_rad / ARM_RAD_PER_STEP
+                )
+            )
+
+            target_pos_steps = max(
+                -ARM_MAX_SAFE_STEPS,
+                min(
+                    ARM_MAX_SAFE_STEPS,
+                    target_pos_steps,
+                ),
+            )
+
+            step_error = target_pos_steps - current_steps
+
+            # ------------------------------------------------------
+            # 6. TARGET STEPS -> PWM
+            #
+            # PWM is updated on every 100 Hz control iteration when
+            # the commanded position has changed.
+            # ------------------------------------------------------
+            if step_error != 0:
+                is_forward = step_error > 0
+
+                GPIO.output(
+                    DIR_PIN,
+                    GPIO.HIGH if is_forward else GPIO.LOW,
+                )
+
+                # Maximum number of steps that corresponds to
+                # MAX_VELOCITY_RAD_S during this 10 ms interval.
+                max_steps_this_update = max(
+                    1,
+                    int(
+                        math.floor(
+                            MAX_VELOCITY_RAD_S
+                            * dt
+                            / ARM_RAD_PER_STEP
+                        )
+                    ),
+                )
+
+                actual_steps = max(
+                    -max_steps_this_update,
+                    min(
+                        max_steps_this_update,
+                        step_error,
+                    ),
+                )
+
+                new_current_steps = current_steps + actual_steps
+
+                new_current_steps = max(
+                    -ARM_MAX_SAFE_STEPS,
+                    min(
+                        ARM_MAX_SAFE_STEPS,
+                        new_current_steps,
+                    ),
+                )
+
+                # Convert the commanded step rate into PWM frequency.
+                #
+                # The PWM frequency is NOT 100 Hz.
+                # 100 Hz is the rate at which this calculation is
+                # refreshed. The resulting PWM frequency can be much
+                # higher because it represents step pulses/second.
+                freq = abs(actual_steps) / dt
+                freq = max(PWM_MIN_FREQ_HZ, freq)
+
+                pwm_step.change_frequency(freq)
+
+                with state_lock:
+                    arm_current_steps = new_current_steps
+
+            else:
+                pwm_step.pause()
+
+                # If the quantized step target has stopped changing,
+                # do not allow a tiny residual velocity to accumulate
+                # indefinitely against the same step position.
+                if abs(
+                    motor_target_rad
+                    - current_steps * ARM_RAD_PER_STEP
+                ) < ARM_RAD_PER_STEP * 0.5:
+                    motor_target_rad = (
+                        current_steps * ARM_RAD_PER_STEP
+                    )
+
+            # ------------------------------------------------------
+            # 7. 100 Hz timing
+            # ------------------------------------------------------
+            next_tick += STEP_UPDATE_PERIOD
+            sleep_time = next_tick - time.perf_counter()
+
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                next_tick = time.perf_counter()
+
+    finally:
+        pwm_step.stop()
+        print("[Step Thread] Stopped.")
+
 
 # ==========================================
 # 5. Flush Telemetry Buffer to CSV
@@ -289,18 +500,39 @@ if __name__ == "__main__":
 
     model_cpu = SB3PolicyMLP(in_features=6, out_features=1).to("cpu")
     model_cpu.eval()
-    load_weights_from_sb3_zip(model_cpu, SB3_ZIP_PATH, device="cpu")
+    load_weights_from_sb3_zip(
+        model_cpu,
+        SB3_ZIP_PATH,
+        device="cpu",
+    )
 
-    control_thread = threading.Thread(target=cpu_control_loop, args=(model_cpu,), daemon=True)
+    control_thread = threading.Thread(
+        target=cpu_control_loop,
+        args=(model_cpu,),
+        daemon=True,
+        name="Control40Hz",
+    )
+
+    step_thread = threading.Thread(
+        target=step_update_loop,
+        daemon=True,
+        name="StepUpdate100Hz",
+    )
+
     control_thread.start()
+    step_thread.start()
 
     try:
         while True:
             time.sleep(0.5)
+
     except KeyboardInterrupt:
         print("\nStopping...")
         stop_event.set()
+
         control_thread.join()
+        step_thread.join()
+
         GPIO.cleanup()
         spi_pendulum.close()
         save_log_to_file()
