@@ -179,6 +179,8 @@ def cpu_control_loop(model: nn.Module):
             pend_rad, norm_pend_vel, norm_angle_pend = process_encoder(pend_ticks, prev_pend_ticks)
             prev_pend_ticks = pend_ticks
 
+            print(f"Pend Pos: {norm_angle_pend:.4f} rad | Pend Vel: {norm_pend_vel:.4f} (norm)")
+
             # 3. Observation Tensor
             features = torch.tensor(
                 [[
@@ -283,7 +285,7 @@ def save_log_to_file():
 if __name__ == "__main__":
     GPIO.setmode(GPIO.BOARD)
     GPIO.setup(DIR_PIN, GPIO.OUT, initial=GPIO.LOW)
-    GPIO.setup(EN_PIN, GPIO.OUT, initial=GPIO.LOW)
+    GPIO.setup(EN_PIN, GPIO.OUT, initial=GPIO.HIGH)
 
     model_cpu = SB3PolicyMLP(in_features=6, out_features=1).to("cpu")
     model_cpu.eval()
