@@ -221,6 +221,7 @@ cython_debug/
 
 # RL training artifacts
 RotaryInvertedPendulum-python/src/rl/runs
+RotaryInvertedPendulum-python/src/rl/Output
 
 #Imported github
 RotaryInvertedPendulum-python/src/rl/purejaxrl

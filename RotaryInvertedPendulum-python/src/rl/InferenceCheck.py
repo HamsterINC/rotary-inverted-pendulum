@@ -37,10 +37,10 @@ def q8_8_relu(tensor):
 # 2. Define Inputs & Network Tensors (6-128-128-1)
 # =========================================================================
 # 6 input activations scaled to Q8.8 format
-input_features = float_to_q8_8([-0.00390625,-0.0078125, 0.49609375 , 0.0, 0.0, 1.046875])
+input_features = float_to_q8_8([0.0,0.0,0.0117,0.9961,0.0586,0.0])
 
 try:
-    zip_path = "runs/ppo_2026-09-08_1707/best_model.zip"
+    zip_path = "Saved_runs/1509.zip"
 
     with zipfile.ZipFile(zip_path, 'r') as archive:
         with archive.open('policy.pth') as f:

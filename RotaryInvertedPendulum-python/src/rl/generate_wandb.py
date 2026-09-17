@@ -31,7 +31,7 @@ def float_to_q_format(val, int_bits, frac_bits, total_bits=16):
     return f"{clamped_val:0{hex_len}x}"
 
 def main():
-    zip_path = "runs/ppo_2026-09-14_1924/best_model.zip"
+    zip_path = "Saved_runs/1509.zip"
 
     with zipfile.ZipFile(zip_path, 'r') as archive:
         with archive.open('policy.pth') as f:
