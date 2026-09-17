@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+from datetime import datetime
 import io
 import math
 import os
@@ -50,6 +52,9 @@ PEND_ZERO_OFFSET_TICKS = 303
 # Hardware Pins
 DIR_PIN = 16
 EN_PIN = 22
+
+# Telemetry Buffer: appended in real-time, written on exit
+log_buffer: list[dict[str, float]] = []
 
 # ==========================================
 # 1. SB3-Compatible MLP Architecture
@@ -116,7 +121,10 @@ def process_encoder(current_ticks: int, prev_ticks: int):
     norm_vel = delta / float(PEND_MAX_DELTA_TICKS)
     norm_vel = max(-1.0, min(1.0, norm_vel))
 
-    return angle_rad, norm_vel
+    # Physical pendulum velocity in rad/s
+    pen_vel_rad_s = (delta * PEND_LSB_RAD) / PERIOD
+
+    return angle_rad, norm_vel, norm_angle
 
 # ==========================================
 # 4. Control Loop (Matches Sim Step Logic)
@@ -140,7 +148,8 @@ def cpu_control_loop(model: nn.Module):
     print(f"[CPU Thread] Starting 40 Hz control loop.")
 
     with torch.no_grad():
-        last_loop_time = time.perf_counter()
+        t_start_session = time.perf_counter()
+        last_loop_time = t_start_session
         next_tick = last_loop_time
 
         while not stop_event.is_set():
@@ -161,9 +170,13 @@ def cpu_control_loop(model: nn.Module):
             norm_arm_vel = arm_delta_steps / float(ARM_MAX_DELTA_STEPS)
             norm_arm_vel = max(-1.0, min(1.0, norm_arm_vel))
 
+            # Actual physical arm velocity (rad/s) computed from step delta
+            physical_arm_vel_rad_s = (arm_delta_steps * ARM_RAD_PER_STEP) / actual_dt_s
+            arm_pos_rad = arm_current_steps * ARM_RAD_PER_STEP
+
             # 2. Pendulum Observations
             pend_ticks = read_raw_ticks(spi_pendulum)
-            pend_rad, norm_pend_vel = process_encoder(pend_ticks, prev_pend_ticks)
+            pend_rad, norm_pend_vel, norm_angle_pend = process_encoder(pend_ticks, prev_pend_ticks)
             prev_pend_ticks = pend_ticks
 
             # 3. Observation Tensor
@@ -188,7 +201,7 @@ def cpu_control_loop(model: nn.Module):
             accel_cmd = action * MAX_ACCEL_RAD_S2
             accel_cmd = max(-MAX_ACCEL_RAD_S2, min(MAX_ACCEL_RAD_S2, accel_cmd))
 
-            # Update velocity
+            # Update commanded velocity
             motor_vel_rad_s = max(
                 -MAX_VELOCITY_RAD_S,
                 min(MAX_VELOCITY_RAD_S, motor_vel_rad_s + accel_cmd * actual_dt_s)
@@ -224,7 +237,17 @@ def cpu_control_loop(model: nn.Module):
             else:
                 pwm_step.pause()
 
-            # 7. Governor
+            # 7. Record Telemetry (In-Memory Buffer)
+            log_buffer.append({
+                "timestamp_s": round(loop_start - t_start_session, 5),
+                "arm_pos_rad": round(norm_arm_pos, 4),
+                "arm_actual_vel_rad_s": round(physical_arm_vel_rad_s, 4),
+                "pendulum_pos_rad": round(norm_angle_pend, 4),
+                "pendulum_vel_rad_s": round(norm_pend_vel, 4),
+                "action_cmd": round(action, 4),
+            })
+
+            # 8. Governor
             next_tick += PERIOD
             sleep_time = next_tick - time.perf_counter()
             if sleep_time > 0:
@@ -235,7 +258,27 @@ def cpu_control_loop(model: nn.Module):
     pwm_step.stop()
 
 # ==========================================
-# 5. Entry Point
+# 5. Flush Telemetry Buffer to CSV
+# ==========================================
+def save_log_to_file():
+    if not log_buffer:
+        print("[Logger] No telemetry frames recorded.")
+        return
+
+    os.makedirs("./logs", exist_ok=True)
+    filename = datetime.now().strftime("./logs/run_%Y%m%d_%H%M%S.csv")
+    print(f"[Logger] Flushing {len(log_buffer)} frames to {filename}...")
+
+    fieldnames = list(log_buffer[0].keys())
+    with open(filename, mode="w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(log_buffer)
+
+    print(f"[Logger] File saved successfully.")
+
+# ==========================================
+# 6. Entry Point
 # ==========================================
 if __name__ == "__main__":
     GPIO.setmode(GPIO.BOARD)
@@ -258,4 +301,5 @@ if __name__ == "__main__":
         control_thread.join()
         GPIO.cleanup()
         spi_pendulum.close()
+        save_log_to_file()
         print("Shutdown clean.")
