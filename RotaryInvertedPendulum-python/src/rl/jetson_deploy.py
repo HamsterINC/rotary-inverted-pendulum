@@ -285,7 +285,7 @@ def save_log_to_file():
 if __name__ == "__main__":
     GPIO.setmode(GPIO.BOARD)
     GPIO.setup(DIR_PIN, GPIO.OUT, initial=GPIO.LOW)
-    GPIO.setup(EN_PIN, GPIO.OUT, initial=GPIO.HIGH)
+    GPIO.setup(EN_PIN, GPIO.OUT, initial=GPIO.LOW)
 
     model_cpu = SB3PolicyMLP(in_features=6, out_features=1).to("cpu")
     model_cpu.eval()
