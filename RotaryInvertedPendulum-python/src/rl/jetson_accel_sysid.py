@@ -26,18 +26,22 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mujoco
 import numpy as np
-
+import Jetson.GPIO as GPIO
+from JetsonPWM import JetsonPWM
 from jetson_logger import JetsonTelemetryLogger
 from pendulum_env import (
     MAX_ACCEL_RAD_S2,
     MAX_VELOCITY_RAD_S,
     RotaryInvertedPendulumEnv,
 )
+import spidev
 
 # ---------------------------------------------------------------------------
 # Hardware & Kinematics Configuration
 # ---------------------------------------------------------------------------
-DIR_PIN = 12                     # Jetson GPIO pin for stepper DIR
+# Hardware Pins
+DIR_PIN = 16
+EN_PIN = 22
 STEP_UPDATE_PERIOD = 0.01        # 100 Hz stepper integration (10 ms)
 PWM_MIN_FREQ_HZ = 10.0           # Lowest nonzero PWM frequency
 ARM_SAFE_LIMIT_RAD = 1.25        # Arm travel limit (~71 deg)
@@ -46,35 +50,6 @@ ARM_MAX_SAFE_STEPS = int(ARM_SAFE_LIMIT_RAD / ARM_RAD_PER_STEP)
 
 STEP_DURATION_S = 3.5
 CHIRP_DURATION_S = 9.0
-
-# Attempt to load Jetson hardware modules; mock on host development machines
-try:
-    import Jetson.GPIO as GPIO
-    from rpi_hardware_pwm import HardwarePWM as JetsonPWM
-except ImportError:
-    class MockJetsonPWM:
-        def __init__(self, chip: int = 0, channel: int = 0): pass
-        def start(self, initial_freq_hz: float = 10.0): pass
-        def change_frequency(self, freq: float): pass
-        def pause(self): pass
-        def stop(self): pass
-
-    class MockGPIO:
-        HIGH = 1
-        LOW = 0
-        BOARD = 10
-        OUT = 1
-        @staticmethod
-        def setmode(mode: int): pass
-        @staticmethod
-        def setup(pin: int, mode: int): pass
-        @staticmethod
-        def output(pin: int, value: int): pass
-        @staticmethod
-        def cleanup(): pass
-
-    JetsonPWM = MockJetsonPWM  # type: ignore
-    GPIO = MockGPIO            # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -89,17 +64,96 @@ motor_vel_rad_s = 0.0
 motor_target_rad = 0.0
 raw_pendulum_angle_rad = 0.0
 
+PEND_ENCODER_RESOLUTION = 16384
+PEND_LSB_RAD = (2.0 * math.pi) / PEND_ENCODER_RESOLUTION
+MAX_PENDULUM_VEL_RAD_S = 30.0
+PEND_MAX_DELTA_TICKS = (MAX_PENDULUM_VEL_RAD_S / PEND_LSB_RAD) * STEP_UPDATE_PERIOD
+PEND_ZERO_OFFSET_TICKS = 303
 
 # ---------------------------------------------------------------------------
-# Sensor Hook (Replace with your SPI/I2C/Encoder reader)
+# SPI Encoder Configuration & State
 # ---------------------------------------------------------------------------
-def read_pendulum_sensor() -> float:
-    """Read the pendulum angle from your hardware encoder bus."""
-    # TODO: Connect your AS5600 / optical encoder SPI/I2C/serial read here.
-    # Return angle in radians where 0.0 = downward equilibrium hanging.
-    global raw_pendulum_angle_rad
-    with state_lock:
-        return raw_pendulum_angle_rad
+
+# Thread-safe encoder tracking state
+_encoder_lock = threading.Lock()
+_prev_ticks = 0
+_initialized_ticks = False
+
+# Safe SPI initialization (bypassed during --skip-real)
+spi_pendulum = None
+def init_spi_sensor():
+    global spi_pendulum, _prev_ticks, _initialized_ticks
+    try:
+        
+        spi_pendulum = spidev.SpiDev()
+        spi_pendulum.open(0, 0)
+        spi_pendulum.max_speed_hz = 100_000
+        spi_pendulum.mode = 1
+        spi_pendulum.bits_per_word = 8
+        
+        # Read initial tick position
+        _prev_ticks = read_raw_ticks(spi_pendulum)
+        _initialized_ticks = True
+        print(f"[SPI Sensor] Initialized successfully. Start ticks: {_prev_ticks}")
+    except Exception as e:
+        print(f"[SPI Sensor Warning] Could not open SPI bus: {e}. Running in mock/skip-real mode.")
+        spi_pendulum = None
+
+
+def read_raw_ticks(spi_device) -> int:
+    if spi_device is None:
+        return 0
+    try:
+        spi_device.xfer2([0xFF, 0xFF])
+        data = spi_device.xfer2([0xC0, 0x00])
+        raw = (data[0] << 8) | data[1]
+        return raw & 0x3FFF
+    except Exception:
+        return 0
+
+
+def process_encoder(current_ticks: int, prev_ticks: int):
+    # Normalized angle calculation
+    norm_angle = (current_ticks + 5000) / 8192.0
+    norm_angle = (norm_angle + 1.0) % 2.0 - 1.0
+    angle_rad = norm_angle * math.pi
+
+    delta = current_ticks - prev_ticks
+    # Handle 14-bit encoder rollover wrap-around if delta is huge
+    if delta > 8192:
+        delta -= 16384
+    elif delta < -8192:
+        delta += 16384
+
+    norm_vel = delta / float(PEND_MAX_DELTA_TICKS)
+    norm_vel = max(-1.0, min(1.0, norm_vel))
+
+    # Physical pendulum velocity in rad/s
+    pen_vel_rad_s = (delta * PEND_LSB_RAD) / STEP_UPDATE_PERIOD
+
+    return angle_rad, norm_vel, pen_vel_rad_s
+
+
+# ---------------------------------------------------------------------------
+# Sensor Hook
+# ---------------------------------------------------------------------------
+def read_pendulum_sensor() -> tuple[float, float]:
+    """Reads SPI encoder and returns (angle_rad, velocity_rad_s)."""
+    global _prev_ticks, _initialized_ticks, spi_pendulum
+    
+    with _encoder_lock:
+        if spi_pendulum is None:
+            return 0.0, 0.0
+        
+        current_ticks = read_raw_ticks(spi_pendulum)
+        if not _initialized_ticks:
+            _prev_ticks = current_ticks
+            _initialized_ticks = True
+
+        angle_rad, _, pen_vel_rad_s = process_encoder(current_ticks, _prev_ticks)
+        _prev_ticks = current_ticks
+        
+        return angle_rad, pen_vel_rad_s
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +162,6 @@ def read_pendulum_sensor() -> float:
 def step_update_loop() -> None:
     """100 Hz discrete stepper kinematics and PWM generator thread."""
     global arm_current_steps, motor_vel_rad_s, motor_target_rad
-
-    GPIO.setmode(GPIO.BOARD)
-    GPIO.setup(DIR_PIN, GPIO.OUT)
 
     pwm_step = JetsonPWM(chip=0, channel=0)
     pwm_step.start(initial_freq_hz=PWM_MIN_FREQ_HZ)
@@ -262,6 +313,8 @@ def run_hardware_profile(
     except EOFError:
         time.sleep(1.0)
 
+    GPIO.setup(DIR_PIN, GPIO.OUT, initial=GPIO.LOW)
+    GPIO.setup(EN_PIN, GPIO.OUT, initial=GPIO.LOW)
     # Start the 100 Hz stepper engine in background
     stop_event.clear()
     thread = threading.Thread(target=step_update_loop, daemon=True)
