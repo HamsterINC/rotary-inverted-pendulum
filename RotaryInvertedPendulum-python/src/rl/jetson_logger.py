@@ -45,7 +45,7 @@ def get_delta_ticks(current_ticks: int, prev_ticks: int) -> int:
     return delta
 
 def process_encoder(current_ticks: int, prev_ticks: int):
-    norm_angle = (current_ticks + 5000) / 8192
+    norm_angle = (current_ticks + 13192) / 8192
     norm_angle = (norm_angle + 1.0) % 2.0 - 1.0
     angle_rad = norm_angle * math.pi
 
