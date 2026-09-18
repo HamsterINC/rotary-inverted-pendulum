@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <mujoco model="rotary_inverted_pendulum">
-  <option timestep="0.001" gravity="0 0 -9.81" integrator="implicitfast"/>
+  <option timestep="0.0005" gravity="0 0 -9.81" integrator="implicitfast" density="1.2" viscosity="1.8e-3"/>
 
   <default>
     <joint armature="0" damping="0"/>
@@ -14,22 +14,22 @@
       <joint name="motor_joint" type="hinge" axis="0 0 1"
              range="-2.356194490192345 2.356194490192345" limited="true"
              damping="0.0001" frictionloss="0"/>
-      <inertial pos="0.0388437 0 0" mass="0.0341342"
-                diaginertia="1e-6 1.75368e-05 1.75368e-05"/>
+      <inertial pos="0.0398571 0 0" mass="0.0367867"
+                diaginertia="1e-6 1.83441e-05 1.83441e-05"/>
       <geom name="arm_visual" type="capsule"
-            fromto="0 0 0 0.059 0 0" size="0.004"
+            fromto="0 0 0 0.06 0 0" size="0.004"
             rgba="0.4 0.6 0.8 1"/>
 
-      <body name="pendulum" pos="0.059 0 0">
+      <body name="pendulum" pos="0.058 0 0">
         <joint name="pendulum_joint" type="hinge" axis="1 0 0"
-               damping="9.574199256999525e-06"
-               frictionloss="2.9311843195099423e-05"/>
-        <inertial pos="0 0 -0.05197865266940266" mass="0.00747898"
-                  diaginertia="4.13814e-06 4.13814e-06 1e-07"/>
+               damping="5.75086e-06"
+               frictionloss="7.74722e-08"/>
+        <inertial pos="0 0 -0.04788029571636855" mass="0.00903535"
+                  diaginertia="6.3619e-06 6.3619e-06 1e-07"/>
         <geom name="pendulum_visual" type="capsule"
-              fromto="0 0 0 0 0 -0.10395730533880532" size="0.003"
+              fromto="0 0 0 0 0 -0.0957605914327371" size="0.003"
               rgba="0.8 0.4 0.4 1"/>
-        <geom name="pendulum_tip" type="sphere" pos="0 0 -0.10395730533880532"
+        <geom name="pendulum_tip" type="sphere" pos="0 0 -0.0957605914327371"
               size="0.006" rgba="0.9 0.7 0.2 1"/>
       </body>
     </body>
@@ -37,7 +37,7 @@
 
   <actuator>
     <position name="motor" joint="motor_joint"
-              kp="100.0" kv="0.21855767097897608"
+              kp="100.0" kv="0.23356877426929817"
               ctrlrange="-2.181661564992912 2.181661564992912"/>
   </actuator>
 </mujoco>

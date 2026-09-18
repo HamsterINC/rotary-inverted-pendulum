@@ -11,8 +11,8 @@
   },
   "pendulum": {
     "derived": {
-      "viscous_friction_N_m_s": 9.574199256999525e-06,
-      "coulomb_friction_N_m": 2.9311843195099424e-05,
+      "viscous_friction_N_m_s": 5.170818e-06,
+      "coulomb_friction_N_m": 8.764099e-08,
       "inertia_predicted_kg_m2": 4.447446e-05,
       "inertia_measured_kg_m2": 4.468763e-05
     },
