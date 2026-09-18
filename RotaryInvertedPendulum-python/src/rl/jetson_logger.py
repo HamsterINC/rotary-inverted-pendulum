@@ -15,7 +15,7 @@ DURATION_SECONDS = 8.0  # Stop recording after 8 seconds
 PEND_ENCODER_RESOLUTION = 16384  # 14-bit (0x3FFF)
 PEND_LSB_RAD = (2.0 * math.pi) / PEND_ENCODER_RESOLUTION
 HALF_RESOLUTION = PEND_ENCODER_RESOLUTION // 2
-PEND_ZERO_OFFSET_TICKS = 303
+PEND_ZERO_OFFSET_TICKS = 0
 
 # ==========================================
 # 2. SPI Hardware Setup
