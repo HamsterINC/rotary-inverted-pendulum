@@ -44,6 +44,19 @@ def get_delta_ticks(current_ticks: int, prev_ticks: int) -> int:
         delta += PEND_ENCODER_RESOLUTION
     return delta
 
+def process_encoder(current_ticks: int, prev_ticks: int):
+    norm_angle = (current_ticks + 5000) / 8192
+    norm_angle = (norm_angle + 1.0) % 2.0 - 1.0
+    angle_rad = norm_angle * math.pi
+
+    delta = current_ticks - prev_ticks
+
+
+    # Physical pendulum velocity in rad/s
+    pen_vel_rad_s = (delta * PEND_LSB_RAD) / SAMPLE_INTERVAL
+
+    return angle_rad, pen_vel_rad_s
+
 
 # ==========================================
 # 3. Main Logging Loop
@@ -82,38 +95,41 @@ def main():
                 # 1. Read hardware encoder
                 current_ticks = read_raw_ticks(spi_pendulum)
 
-                # 2. Convert ticks to raw continuous radians [-pi, pi]
-                # Center using the calibrated zero-offset tick position
-                centered_ticks = (current_ticks - PEND_ZERO_OFFSET_TICKS) % PEND_ENCODER_RESOLUTION
-                raw_rad = (centered_ticks * PEND_LSB_RAD)
-                if raw_rad > math.pi:
-                    raw_rad -= 2.0 * math.pi
+                # # 2. Convert ticks to raw continuous radians [-pi, pi]
+                # # Center using the calibrated zero-offset tick position
+                # centered_ticks = (current_ticks - PEND_ZERO_OFFSET_TICKS) % PEND_ENCODER_RESOLUTION
+                # raw_rad = (centered_ticks * PEND_LSB_RAD)
+                # if raw_rad > math.pi:
+                #     raw_rad -= 2.0 * math.pi
 
-                # 3. Phase unwrap (prevents 2*pi jumps when crossing -pi / +pi)
-                if prev_raw_rad is not None:
-                    diff = raw_rad - prev_raw_rad
-                    if diff > math.pi:
-                        accumulated_offset -= 2.0 * math.pi
-                    elif diff < -math.pi:
-                        accumulated_offset += 2.0 * math.pi
+                # # 3. Phase unwrap (prevents 2*pi jumps when crossing -pi / +pi)
+                # if prev_raw_rad is not None:
+                #     diff = raw_rad - prev_raw_rad
+                #     if diff > math.pi:
+                #         accumulated_offset -= 2.0 * math.pi
+                #     elif diff < -math.pi:
+                #         accumulated_offset += 2.0 * math.pi
 
-                unwrapped_rad = raw_rad + accumulated_offset
-                prev_raw_rad = raw_rad
+                # unwrapped_rad = raw_rad + accumulated_offset
+                # prev_raw_rad = raw_rad
 
-                # 4. Direct velocity differentiation using modular tick step
-                if prev_time is not None:
-                    dt = now - prev_time
-                    delta_ticks = get_delta_ticks(current_ticks, prev_ticks)
-                    vel_rad_s = (delta_ticks * PEND_LSB_RAD) / dt if dt > 0 else 0.0
-                else:
-                    vel_rad_s = 0.0
+                # # 4. Direct velocity differentiation using modular tick step
+                # if prev_time is not None:
+                #     dt = now - prev_time
+                #     delta_ticks = get_delta_ticks(current_ticks, prev_ticks)
+                #     vel_rad_s = (delta_ticks * PEND_LSB_RAD) / dt if dt > 0 else 0.0
+                # else:
+                #     vel_rad_s = 0.0
 
+                # prev_ticks = current_ticks
+                # prev_unwrapped = unwrapped_rad
+                # prev_time = now
+
+                angle_rad, vel_rad_s = process_encoder(current_ticks, prev_ticks)
                 prev_ticks = current_ticks
-                prev_unwrapped = unwrapped_rad
-                prev_time = now
 
                 # Store row: [time, unwrapped_angle, angular_velocity]
-                data_log.append((round(elapsed, 5), round(unwrapped_rad, 6), round(vel_rad_s, 6)))
+                data_log.append((round(elapsed, 5), round(angle_rad, 6), round(vel_rad_s, 6)))
 
                 next_sample_time += SAMPLE_INTERVAL
 

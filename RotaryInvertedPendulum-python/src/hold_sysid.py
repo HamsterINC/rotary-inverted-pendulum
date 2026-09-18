@@ -6,7 +6,7 @@ from scipy.optimize import minimize
 
 # 1. Load the Clamped Pendulum Dataset
 # CSV should contain: time_s, pendulum_angle_unwrapped, pendulum_vel_rad_s
-df = pd.read_csv("clamped_pendulum_decay.csv")
+df = pd.read_csv("rl/clamped_pendulum_decay.csv")
 
 t_exp = df["time_s"].values
 alpha_exp = df["pendulum_angle_unwrapped"].values
