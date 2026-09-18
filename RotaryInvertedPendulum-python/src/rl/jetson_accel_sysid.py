@@ -312,7 +312,7 @@ def run_hardware_profile(
         input("  Center motor arm, steady pendulum hanging downward, press [ENTER]...")
     except EOFError:
         time.sleep(1.0)
-
+    GPIO.setmode(GPIO.BOARD)
     GPIO.setup(DIR_PIN, GPIO.OUT, initial=GPIO.LOW)
     GPIO.setup(EN_PIN, GPIO.OUT, initial=GPIO.LOW)
     # Start the 100 Hz stepper engine in background
