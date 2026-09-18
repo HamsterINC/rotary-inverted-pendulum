@@ -1,157 +1,108 @@
+"""High-rate telemetry logger for Jetson embedded deployment."""
+
+from __future__ import annotations
+
 import csv
-import math
 import time
+from pathlib import Path
+from typing import Any
 import numpy as np
-import spidev
-
-# ==========================================
-# 1. Configuration
-# ==========================================
-OUTPUT_FILE = "clamped_pendulum_decay.csv"
-SAMPLE_RATE_HZ = 100.0  # 100 Hz = 10 ms interval
-SAMPLE_INTERVAL = 1.0 / SAMPLE_RATE_HZ
-DURATION_SECONDS = 8.0  # Stop recording after 8 seconds
-
-PEND_ENCODER_RESOLUTION = 16384  # 14-bit (0x3FFF)
-PEND_LSB_RAD = (2.0 * math.pi) / PEND_ENCODER_RESOLUTION
-HALF_RESOLUTION = PEND_ENCODER_RESOLUTION // 2
-PEND_ZERO_OFFSET_TICKS = 0
-
-# ==========================================
-# 2. SPI Hardware Setup
-# ==========================================
-spi_pendulum = spidev.SpiDev()
-spi_pendulum.open(0, 0)
-spi_pendulum.max_speed_hz = 100_000
-spi_pendulum.mode = 1
-spi_pendulum.bits_per_word = 8
 
 
-def read_raw_ticks(spi_device) -> int:
-    """Reads 14-bit raw position from SPI encoder."""
-    spi_device.xfer2([0xFF, 0xFF])
-    data = spi_device.xfer2([0xC0, 0x00])
-    raw = (data[0] << 8) | data[1]
-    return raw & 0x3FFF
+class JetsonTelemetryLogger:
+    """Buffers and flushes synchronized hardware & simulation telemetry."""
 
+    FIELDNAMES = [
+        "time_s",
+        "arm_pos_rad",
+        "arm_vel_rad_s",
+        "pendulum_pos_rad",
+        "pendulum_angle_unwrapped",
+        "control_action",
+        "sim_cart_pos",
+        "sim_pole_angle",
+        "dyn_ghost_sim_pole_angle",
+    ]
 
-def get_delta_ticks(current_ticks: int, prev_ticks: int) -> int:
-    """Computes tick difference handling circular encoder rollover (0 <-> 16383)."""
-    delta = current_ticks - prev_ticks
-    if delta > HALF_RESOLUTION:
-        delta -= PEND_ENCODER_RESOLUTION
-    elif delta < -HALF_RESOLUTION:
-        delta += PEND_ENCODER_RESOLUTION
-    return delta
+    def __init__(self, output_dir: str | Path = "/tmp", tag: str = "sysid_accel"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.tag = tag
 
-def process_encoder(current_ticks: int, prev_ticks: int):
-    norm_angle = (current_ticks + 13192) / 8192
-    norm_angle = (norm_angle + 1.0) % 2.0 - 1.0
-    angle_rad = norm_angle * math.pi
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.csv_path = self.output_dir / f"{tag}_{timestamp}.csv"
+        self.npz_path = self.output_dir / f"{tag}_{timestamp}.npz"
 
-    delta = current_ticks - prev_ticks
+        self._records: list[dict[str, float]] = []
+        self._prev_raw_pole: float | None = None
+        self._wrap_offset: float = 0.0
 
+    def unwrap_angle(self, raw_angle: float) -> float:
+        """Continuous phase tracking across [-pi, pi] rolls."""
+        if self._prev_raw_pole is None:
+            self._prev_raw_pole = raw_angle
+            return raw_angle
 
-    # Physical pendulum velocity in rad/s
-    pen_vel_rad_s = (delta * PEND_LSB_RAD) / SAMPLE_INTERVAL
+        diff = raw_angle - self._prev_raw_pole
+        if diff > np.pi:
+            self._wrap_offset -= 2.0 * np.pi
+        elif diff < -np.pi:
+            self._wrap_offset += 2.0 * np.pi
 
-    return angle_rad, pen_vel_rad_s
+        self._prev_raw_pole = raw_angle
+        return raw_angle + self._wrap_offset
 
+    def log(
+        self,
+        t_s: float,
+        arm_pos: float,
+        arm_vel: float,
+        pen_pos: float,
+        accel_cmd: float,
+        sim_cart_pos: float = 0.0,
+        sim_pole_angle: float = 0.0,
+        dyn_ghost_pole: float = 0.0,
+    ) -> None:
+        """Append one frame of real-time telemetry."""
+        unwrapped_pen = self.unwrap_angle(pen_pos)
+        record = {
+            "time_s": float(t_s),
+            "arm_pos_rad": float(arm_pos),
+            "arm_vel_rad_s": float(arm_vel),
+            "pendulum_pos_rad": float(pen_pos),
+            "pendulum_angle_unwrapped": float(unwrapped_pen),
+            "control_action": float(accel_cmd),
+            "sim_cart_pos": float(sim_cart_pos),
+            "sim_pole_angle": float(sim_pole_angle),
+            "dyn_ghost_sim_pole_angle": float(dyn_ghost_pole),
+        }
+        self._records.append(record)
 
-# ==========================================
-# 3. Main Logging Loop
-# ==========================================
-def main():
-    print("=" * 60)
-    print("CLAMPED PENDULUM LOGGER")
-    print("1. Ensure the motor arm is rigidly clamped/locked.")
-    print("2. Deflect the pendulum to ~30-45 degrees.")
-    print("=" * 60)
-    input("Press ENTER to start recording and immediately release the pendulum...")
+    def write_csv(self) -> Path:
+        """Write all logged data to disk as CSV."""
+        if not self._records:
+            return self.csv_path
 
-    data_log = []
+        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+            writer.writeheader()
+            writer.writerows(self._records)
 
-    # Read initial baseline
-    prev_ticks = read_raw_ticks(spi_pendulum)
-    accumulated_offset = 0.0
-    prev_raw_rad = None
-    prev_unwrapped = None
-    prev_time = None
+        return self.csv_path
 
-    t_start = time.perf_counter()
-    next_sample_time = t_start
+    def write_npz(self, **extra_arrays: Any) -> Path:
+        """Write records to compressed NPZ archive with optional auxiliary arrays."""
+        data_dict: dict[str, Any] = {}
+        for key in self.FIELDNAMES:
+            data_dict[key] = np.array([r[key] for r in self._records], dtype=np.float64)
 
-    print(f"Logging for {DURATION_SECONDS} seconds at {SAMPLE_RATE_HZ} Hz...")
+        data_dict.update(extra_arrays)
+        np.savez_compressed(self.npz_path, **data_dict)
+        return self.npz_path
 
-    try:
-        while True:
-            now = time.perf_counter()
-            elapsed = now - t_start
-
-            if elapsed >= DURATION_SECONDS:
-                break
-
-            if now >= next_sample_time:
-                # 1. Read hardware encoder
-                current_ticks = read_raw_ticks(spi_pendulum)
-
-                # # 2. Convert ticks to raw continuous radians [-pi, pi]
-                # # Center using the calibrated zero-offset tick position
-                # centered_ticks = (current_ticks - PEND_ZERO_OFFSET_TICKS) % PEND_ENCODER_RESOLUTION
-                # raw_rad = (centered_ticks * PEND_LSB_RAD)
-                # if raw_rad > math.pi:
-                #     raw_rad -= 2.0 * math.pi
-
-                # # 3. Phase unwrap (prevents 2*pi jumps when crossing -pi / +pi)
-                # if prev_raw_rad is not None:
-                #     diff = raw_rad - prev_raw_rad
-                #     if diff > math.pi:
-                #         accumulated_offset -= 2.0 * math.pi
-                #     elif diff < -math.pi:
-                #         accumulated_offset += 2.0 * math.pi
-
-                # unwrapped_rad = raw_rad + accumulated_offset
-                # prev_raw_rad = raw_rad
-
-                # # 4. Direct velocity differentiation using modular tick step
-                # if prev_time is not None:
-                #     dt = now - prev_time
-                #     delta_ticks = get_delta_ticks(current_ticks, prev_ticks)
-                #     vel_rad_s = (delta_ticks * PEND_LSB_RAD) / dt if dt > 0 else 0.0
-                # else:
-                #     vel_rad_s = 0.0
-
-                # prev_ticks = current_ticks
-                # prev_unwrapped = unwrapped_rad
-                # prev_time = now
-
-                angle_rad, vel_rad_s = process_encoder(current_ticks, prev_ticks)
-                prev_ticks = current_ticks
-
-                # Store row: [time, unwrapped_angle, angular_velocity]
-                data_log.append((round(elapsed, 5), round(angle_rad, 6), round(vel_rad_s, 6)))
-
-                next_sample_time += SAMPLE_INTERVAL
-
-            # Yield thread to keep CPU usage low
-            sleep_time = next_sample_time - time.perf_counter()
-            if sleep_time > 0.001:
-                time.sleep(sleep_time)
-
-    except KeyboardInterrupt:
-        print("\nRecording aborted early by user.")
-    finally:
-        spi_pendulum.close()
-
-    # Save to CSV
-    print(f"\nWriting {len(data_log)} samples to {OUTPUT_FILE}...")
-    with open(OUTPUT_FILE, mode="w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["time_s", "pendulum_angle_unwrapped", "pendulum_vel_rad_s"])
-        writer.writerows(data_log)
-
-    print("Done! CSV saved successfully.")
-
-
-if __name__ == "__main__":
-    main()
+    def to_dataframe_dict(self) -> dict[str, np.ndarray]:
+        """Convert current records to dict of 1D numpy arrays."""
+        return {
+            key: np.array([r[key] for r in self._records], dtype=np.float64)
+            for key in self.FIELDNAMES
+        }
