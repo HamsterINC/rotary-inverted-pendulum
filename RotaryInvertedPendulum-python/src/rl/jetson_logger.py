@@ -1,40 +1,67 @@
 import csv
+import math
 import time
 import numpy as np
+import spidev
 
-# Configuration
+# ==========================================
+# 1. Configuration
+# ==========================================
 OUTPUT_FILE = "clamped_pendulum_decay.csv"
-SAMPLE_RATE_HZ = 100.0          # 100 Hz = 10 ms interval
+SAMPLE_RATE_HZ = 100.0  # 100 Hz = 10 ms interval
 SAMPLE_INTERVAL = 1.0 / SAMPLE_RATE_HZ
-DURATION_SECONDS = 8.0          # Stop recording after 8 seconds
+DURATION_SECONDS = 8.0  # Stop recording after 8 seconds
 
-# ---------------------------------------------------------
-# HARDWARE HOOK: Replace this with your actual sensor call
-# ---------------------------------------------------------
-def read_raw_pendulum_radians():
-    """
-    Query your encoder/sensor and return angle in radians.
-    Example for PySerial:
-        line = ser.readline().decode().strip()
-        return float(line)
-    """
-    # Placeholder: replace with actual hardware read
-    raise NotImplementedError("Connect your encoder/ADC read call here.")
+PEND_ENCODER_RESOLUTION = 16384  # 14-bit (0x3FFF)
+PEND_LSB_RAD = (2.0 * math.pi) / PEND_ENCODER_RESOLUTION
+HALF_RESOLUTION = PEND_ENCODER_RESOLUTION // 2
+PEND_ZERO_OFFSET_TICKS = 303
+
+# ==========================================
+# 2. SPI Hardware Setup
+# ==========================================
+spi_pendulum = spidev.SpiDev()
+spi_pendulum.open(0, 0)
+spi_pendulum.max_speed_hz = 100_000
+spi_pendulum.mode = 1
+spi_pendulum.bits_per_word = 8
 
 
+def read_raw_ticks(spi_device) -> int:
+    """Reads 14-bit raw position from SPI encoder."""
+    spi_device.xfer2([0xFF, 0xFF])
+    data = spi_device.xfer2([0xC0, 0x00])
+    raw = (data[0] << 8) | data[1]
+    return raw & 0x3FFF
+
+
+def get_delta_ticks(current_ticks: int, prev_ticks: int) -> int:
+    """Computes tick difference handling circular encoder rollover (0 <-> 16383)."""
+    delta = current_ticks - prev_ticks
+    if delta > HALF_RESOLUTION:
+        delta -= PEND_ENCODER_RESOLUTION
+    elif delta < -HALF_RESOLUTION:
+        delta += PEND_ENCODER_RESOLUTION
+    return delta
+
+
+# ==========================================
+# 3. Main Logging Loop
+# ==========================================
 def main():
     print("=" * 60)
     print("CLAMPED PENDULUM LOGGER")
-    print("1. Ensure motor arm is rigidly clamped/locked.")
-    print("2. Deflect pendulum to ~30-45 deg.")
+    print("1. Ensure the motor arm is rigidly clamped/locked.")
+    print("2. Deflect the pendulum to ~30-45 degrees.")
     print("=" * 60)
     input("Press ENTER to start recording and immediately release the pendulum...")
 
     data_log = []
-    
-    # State tracking for unwrap and velocity differentiation
-    prev_raw = None
+
+    # Read initial baseline
+    prev_ticks = read_raw_ticks(spi_pendulum)
     accumulated_offset = 0.0
+    prev_raw_rad = None
     prev_unwrapped = None
     prev_time = None
 
@@ -51,53 +78,64 @@ def main():
             if elapsed >= DURATION_SECONDS:
                 break
 
-            # Rate-limiting / timer loop
             if now >= next_sample_time:
-                # 1. Read raw angle
-                raw_rad = read_raw_pendulum_radians()
+                # 1. Read hardware encoder
+                current_ticks = read_raw_ticks(spi_pendulum)
 
-                # 2. Phase unwrapping (handles rollover if sensor wraps at +/- pi)
-                if prev_raw is not None:
-                    diff = raw_rad - prev_raw
-                    if diff > np.pi:
-                        accumulated_offset -= 2.0 * np.pi
-                    elif diff < -np.pi:
-                        accumulated_offset += 2.0 * np.pi
-                
+                # 2. Convert ticks to raw continuous radians [-pi, pi]
+                # Center using the calibrated zero-offset tick position
+                centered_ticks = (current_ticks - PEND_ZERO_OFFSET_TICKS) % PEND_ENCODER_RESOLUTION
+                raw_rad = (centered_ticks * PEND_LSB_RAD)
+                if raw_rad > math.pi:
+                    raw_rad -= 2.0 * math.pi
+
+                # 3. Phase unwrap (prevents 2*pi jumps when crossing -pi / +pi)
+                if prev_raw_rad is not None:
+                    diff = raw_rad - prev_raw_rad
+                    if diff > math.pi:
+                        accumulated_offset -= 2.0 * math.pi
+                    elif diff < -math.pi:
+                        accumulated_offset += 2.0 * math.pi
+
                 unwrapped_rad = raw_rad + accumulated_offset
-                prev_raw = raw_rad
+                prev_raw_rad = raw_rad
 
-                # 3. Compute angular velocity (finite difference)
+                # 4. Direct velocity differentiation using modular tick step
                 if prev_time is not None:
                     dt = now - prev_time
-                    vel_rad_s = (unwrapped_rad - prev_unwrapped) / dt if dt > 0 else 0.0
+                    delta_ticks = get_delta_ticks(current_ticks, prev_ticks)
+                    vel_rad_s = (delta_ticks * PEND_LSB_RAD) / dt if dt > 0 else 0.0
                 else:
                     vel_rad_s = 0.0
 
+                prev_ticks = current_ticks
                 prev_unwrapped = unwrapped_rad
                 prev_time = now
 
-                # Store sample
+                # Store row: [time, unwrapped_angle, angular_velocity]
                 data_log.append((round(elapsed, 5), round(unwrapped_rad, 6), round(vel_rad_s, 6)))
 
                 next_sample_time += SAMPLE_INTERVAL
 
-            # Prevent high CPU spinning while waiting for next interval
+            # Yield thread to keep CPU usage low
             sleep_time = next_sample_time - time.perf_counter()
             if sleep_time > 0.001:
                 time.sleep(sleep_time)
 
     except KeyboardInterrupt:
         print("\nRecording aborted early by user.")
+    finally:
+        spi_pendulum.close()
 
-    # Write to CSV
+    # Save to CSV
     print(f"\nWriting {len(data_log)} samples to {OUTPUT_FILE}...")
     with open(OUTPUT_FILE, mode="w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["time_s", "pendulum_angle_unwrapped", "pendulum_vel_rad_s"])
         writer.writerows(data_log)
 
-    print("Done! File ready for parameter fitting.")
+    print("Done! CSV saved successfully.")
+
 
 if __name__ == "__main__":
     main()
