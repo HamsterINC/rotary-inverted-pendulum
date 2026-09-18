@@ -322,7 +322,7 @@ def run_hardware_profile(
     time.sleep(0.2)
 
     init_motor = 0.0
-    init_pen = read_pendulum_sensor()
+    init_pen, vel_pen = read_pendulum_sensor()
 
     t0 = time.perf_counter()
     next_tick = t0
@@ -340,7 +340,7 @@ def run_hardware_profile(
                 current_vel = motor_vel_rad_s
 
             arm_pos = current_steps * ARM_RAD_PER_STEP
-            pen_pos = read_pendulum_sensor()
+            pen_pos, pen_vel = read_pendulum_sensor()
 
             logger.log(
                 t_s=t_rel,
