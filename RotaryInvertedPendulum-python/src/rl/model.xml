@@ -37,7 +37,7 @@
 
   <actuator>
     <position name="motor" joint="motor_joint"
-              kp="100.0" kv="0.23356877426929817"
+              kp="50.0" kv="0.23356877426929817"
               ctrlrange="-2.181661564992912 2.181661564992912"/>
   </actuator>
 </mujoco>

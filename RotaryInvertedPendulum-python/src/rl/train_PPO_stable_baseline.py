@@ -59,8 +59,8 @@ def make_env(
     dr_action_delay_steps_range: tuple[int, int] | None = None,
     dr_action_lag_tau_range_s: tuple[float, float] | None = None,
     dr_control_dt_jitter_frac: float | None = None,
-    control_freq_hz: float = 100.0,
-    max_accel_rad_s2: float = 150.0,
+    control_freq_hz: float = 40.0,
+    max_accel_rad_s2: float = 50.0,
     max_velocity_rad_s: float | None = None,
     reward_action_rate_weight: float | None = None,
     reward_motor_vel_weight: float | None = None,
@@ -291,7 +291,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="lower bound on action_delay_steps sampled per episode")
     p.add_argument("--dr-delay-max", type=int, default=None,
                    help="upper bound on action_delay_steps. Set this to override env defaults.")
-    p.add_argument("--dr-action-lag-tau-min", type=float, default=0.0,
+    p.add_argument("--dr-action-lag-tau-min", type=float, default=0.001,
                    help="lower bound on first-order action-lag time constant "
                         "(seconds) sampled per episode.")
     p.add_argument("--dr-action-lag-tau-max", type=float, default=None,
@@ -304,7 +304,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "fine-tuning and deployment. 35 Hz is the empirically-best "
                         "operating point for this rig — see "
                         "docs/control_rate_selection.md for the principled selection.")
-    p.add_argument("--max-accel-rad-s2", type=float, default=150.0,
+    p.add_argument("--max-accel-rad-s2", type=float, default=50.0,
                    help="action ∈ [-1, 1] maps to angular accel ∈ [-max, +max]"
                         " rad/s². Default 150 ≈ 76% of the motor's physical "
                         "envelope (~196 rad/s² at 50 kSteps/s²). Bumped from "

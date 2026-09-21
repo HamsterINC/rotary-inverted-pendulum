@@ -43,9 +43,9 @@ import spidev
 DIR_PIN = 16
 EN_PIN = 22
 STEP_UPDATE_PERIOD = 0.01        # 100 Hz stepper integration (10 ms)
-PWM_MIN_FREQ_HZ = 10.0           # Lowest nonzero PWM frequency
+PWM_MIN_FREQ_HZ = 60.0           # Lowest nonzero PWM frequency
 ARM_SAFE_LIMIT_RAD = 1.25        # Arm travel limit (~71 deg)
-ARM_RAD_PER_STEP = 0.0019634954  # 2*pi / (200 steps * 16 microsteps) ~ 3200 steps/rev
+ARM_RAD_PER_STEP = 0.00049087385  # 2*pi / (200 steps * 16 microsteps) ~ 3200 steps/rev
 ARM_MAX_SAFE_STEPS = int(ARM_SAFE_LIMIT_RAD / ARM_RAD_PER_STEP)
 
 STEP_DURATION_S = 3.5
@@ -482,7 +482,7 @@ def main() -> int:
     parser.add_argument("--waveform", choices=["step", "chirp", "all"], default="all")
     parser.add_argument("--sample-rate", type=float, default=100.0, help="Sampling frequency (default: 100 Hz)")
     parser.add_argument("--out-dir", default="/tmp", help="Output directory for telemetry & plots")
-    parser.add_argument("--skip-real", action="store_true", help="Dry run without physical PWM/GPIO")
+    parser.add_argument("--skip-real", default=False, action="store_true", help="Dry run without physical PWM/GPIO")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -513,6 +513,8 @@ def main() -> int:
                 t = i / args.sample_rate
                 logger.log(t, 0.0, 0.0, 0.0, wave_fn(t))
         else:
+            init_spi_sensor()
+            print("  Running waveform on Jetson hardware...")
             init_m, init_p = run_hardware_profile(wave_fn, duration, args.sample_rate, logger)
 
         print("  Replaying trajectory in MuJoCo physics engine...")

@@ -13,14 +13,14 @@ from pendulum_env import RotaryInvertedPendulumEnv
 # =====================================================================
 # Configuration
 # =====================================================================
-MAX_ACCEL_RAD_S2 = 150.0
-MOTOR_MAX_ACCEL_RAD_S2 = 75.0
+MAX_ACCEL_RAD_S2 = 120.0
+MOTOR_MAX_ACCEL_RAD_S2 = 50.0
 MAX_VELOCITY_RAD_S = 5.0
 MOTOR_SAFE_LIMIT_RAD = 1.2
 SLOWDOWN_FACTOR = 4.0
 
 FPGA = False
-action_lag_tau_s = 0.023
+action_lag_tau_s = 0.005
 action_delay_steps = 0
 
 CSV_FILE = "logs/run_20260917_115604.csv"
