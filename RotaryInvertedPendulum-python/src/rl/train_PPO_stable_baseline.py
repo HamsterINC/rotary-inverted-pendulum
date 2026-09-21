@@ -310,7 +310,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "envelope (~196 rad/s² at 50 kSteps/s²). Bumped from "
                         "100 after observing the policy saturating accel_cmd "
                         "in the first accel-mode deployment.")
-    p.add_argument("--max-velocity-rad-s", type=float, default=None,
+    p.add_argument("--max-velocity-rad-s", type=float, default=5.0,
                    help="motor angular-velocity saturation cap (rad/s). "
                         "Default None → env default (5.0). Lower values "
                         "force the policy below the Kapitza parametric "
@@ -350,7 +350,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "Quanser paper; default None → env default (0.0, "
                         "disabled). Distinct from --reward-action-rate-weight "
                         "(command jerk). Try 0.01 as a gentle starting point.")
-    p.add_argument("--reward-action-rate-weight", type=float, default=None,
+    p.add_argument("--reward-action-rate-weight", type=float, default=0.02,
                    help="penalty on (action_t - action_{t-1})² in the reward. "
                         "Default None → env default (0.0; disabled in accel "
                         "mode). Re-enabling with a small value (e.g. 0.02) "
