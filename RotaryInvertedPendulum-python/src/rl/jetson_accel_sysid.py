@@ -259,22 +259,22 @@ def step_update_loop() -> None:
 def waveform_step(t: float) -> float:
     """Bipolar acceleration pulses designed to bound arm position."""
     if t < 0.3: return 0.0
-    if t < 0.4: return +50.0
-    if t < 0.5: return -50.0
+    if t < 0.4: return +20.0
+    if t < 0.5: return -20.0
     if t < 1.0: return 0.0
-    if t < 1.05: return +100.0
-    if t < 1.10: return -100.0
+    if t < 1.05: return +30.0
+    if t < 1.10: return -30.0
     if t < 1.6:  return 0.0
-    if t < 1.633: return +150.0
-    if t < 1.667: return -150.0
+    if t < 1.633: return +50.0
+    if t < 1.667: return -50.0
     if t < 2.2:   return 0.0
-    if t < 2.25:  return -100.0
-    if t < 2.30:  return +100.0
+    if t < 2.25:  return -30.0
+    if t < 2.30:  return +30.0
     if t < 2.8:   return 0.0
     # Dynamic zero-crossing reversal
-    if t < 2.85:  return +100.0
-    if t < 2.95:  return -100.0
-    if t < 3.00:  return +100.0
+    if t < 2.85:  return +20.0
+    if t < 2.95:  return -20.0
+    if t < 3.00:  return +20.0
     return 0.0
 
 
@@ -285,7 +285,7 @@ def waveform_chirp(t: float) -> float:
     if s > 8.0: return 0.0
     f0, f1 = 0.5, 3.0
     freq = f0 + (f1 - f0) * s / 8.0
-    return 100.0 * math.sin(2.0 * math.pi * freq * s)
+    return 50.0 * math.sin(2.0 * math.pi * freq * s)
 
 
 # ---------------------------------------------------------------------------
