@@ -13,19 +13,19 @@ from pendulum_env import RotaryInvertedPendulumEnv
 # =====================================================================
 # Configuration
 # =====================================================================
-MAX_ACCEL_RAD_S2 = 50.0
-MOTOR_MAX_ACCEL_RAD_S2 = 50.0
-MAX_VELOCITY_RAD_S = 5.0
+MAX_ACCEL_RAD_S2 = 150.0
+MOTOR_MAX_ACCEL_RAD_S2 = 150.0
+MAX_VELOCITY_RAD_S = 10.0
 MOTOR_SAFE_LIMIT_RAD = 1.2
 SLOWDOWN_FACTOR = 4.0
 
 FPGA = False
-action_lag_tau_s = 0.000
-action_delay_steps = 0
+action_lag_tau_s = 0.001
+action_delay_steps = 1
 
-CSV_FILE = "logs/run_20260921_161619.csv"
+CSV_FILE = "logs/run_20260921_181307.csv"
 OUTPUT_CSV = "logs/telemetry_run_with_sim.csv"
-SB3_ZIP_PATH = "Saved_runs/2109.zip"
+SB3_ZIP_PATH = "Saved_runs/1509.zip"
 
 
 # =====================================================================
@@ -162,7 +162,7 @@ else:
     )
 
 raw_angles_rad = df["pendulum_angle_rad"].to_numpy() * np.pi + np.pi
-angle_rad_motor = df["arm_pos_rad"].to_numpy() #* np.pi
+angle_rad_motor = df["arm_pos_rad"].to_numpy() 
 
 df["pendulum_angle_unwrapped"] = np.unwrap(raw_angles_rad)
 df["arm_pos_rad"] = angle_rad_motor

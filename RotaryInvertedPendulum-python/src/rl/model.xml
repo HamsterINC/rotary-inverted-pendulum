@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <mujoco model="rotary_inverted_pendulum">
-  <option timestep="0.0005" gravity="0 0 -9.81" integrator="implicitfast" density="1.2" viscosity="1.8e-3"/>
+  <option timestep="0.0005" gravity="0 0 -9.81" integrator="implicitfast" density="1.2" viscosity="1.8e-5"/>
 
   <default>
     <joint armature="0" damping="0"/>
@@ -13,7 +13,7 @@
     <body name="arm" pos="0 0 0">
       <joint name="motor_joint" type="hinge" axis="0 0 1"
              range="-2.356194490192345 2.356194490192345" limited="true"
-             damping="0.0001" frictionloss="0"/>
+             damping="0.00001" frictionloss="0"/>
       <inertial pos="0.0398571 0 0" mass="0.0367867"
                 diaginertia="1e-6 1.83441e-05 1.83441e-05"/>
       <geom name="arm_visual" type="capsule"
@@ -37,7 +37,7 @@
 
   <actuator>
     <position name="motor" joint="motor_joint"
-              kp="50.0" kv="0.23356877426929817"
+              kp="100.0" kv="0.23356877426929817"
               ctrlrange="-2.181661564992912 2.181661564992912"/>
   </actuator>
 </mujoco>
