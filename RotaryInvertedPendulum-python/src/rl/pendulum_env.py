@@ -102,7 +102,7 @@ DR_PENDULUM_FRICTION_MULT_RANGE = (0.5, 2.0)
 # Velocity is the integral of accel, capped at MAX_VELOCITY_RAD_S; position
 # is the integral of velocity, fed to the existing PD position actuator.
 MAX_VELOCITY_RAD_S = 5.0
-MAX_ACCEL_RAD_S2 = 150.0   # bumped from 100 after the first accel-mode
+MAX_ACCEL_RAD_S2 = 50.0   # bumped from 100 after the first accel-mode
                             # deployment showed the policy saturating its
                             # accel command at ±99 repeatedly — needed more
                             # authority. The firmware envelope is much
