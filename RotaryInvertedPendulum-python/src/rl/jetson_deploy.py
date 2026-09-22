@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from JetsonPWM import JetsonPWM
 
-SB3_ZIP_PATH = "./Saved_runs/1509.zip"
+SB3_ZIP_PATH = "./Saved_runs/2209-4.zip"
 
 # ==========================================
 # Timing Constants
@@ -39,7 +39,7 @@ MAX_ACCEL_RAD_S2 = 150.0
 MAX_VELOCITY_RAD_S = 5.0
 ARM_MAX_DELTA_STEPS = (MAX_VELOCITY_RAD_S / ARM_RAD_PER_STEP) * PERIOD
 
-PWM_MIN_FREQ_HZ = 60.0
+PWM_MIN_FREQ_HZ = 40.0
 
 # ==========================================
 # Pendulum Calibration Constants (SPI)
@@ -215,15 +215,18 @@ def cpu_control_loop(model: nn.Module):
             )
             prev_pend_ticks = pend_ticks
 
-            print(
-                f"Pend Pos: {pend_rad:.4f} rad | "
-                f"Pend Vel: {norm_pend_vel:.4f} (norm)"
-            )
+            #print(
+            #    f"Pend Pos: {pend_rad:.4f} rad | "
+            #    f"Pend Vel: {norm_pend_vel:.4f} (norm)"
+            #    f"Arm Pos: {norm_arm_pos:.4f} norm "
+            #    f"Arm Vel: {norm_arm_vel:.4f} norm "
+            #    f"F_prev: {action:.4f} "
+            #)
 
             # 3. Observation tensor
             features = torch.tensor(
                 [[
-                    norm_arm_pos*math.pi,
+                    norm_arm_pos,
                     math.cos(-pend_rad),
                     math.sin(-pend_rad),
                     norm_arm_vel,
@@ -457,7 +460,7 @@ def step_update_loop():
                     motor_target_rad = (
                         current_steps * ARM_RAD_PER_STEP
                     )
-
+            #print(motor_vel_rad_s)
             # ------------------------------------------------------
             # 7. 100 Hz timing
             # ------------------------------------------------------
