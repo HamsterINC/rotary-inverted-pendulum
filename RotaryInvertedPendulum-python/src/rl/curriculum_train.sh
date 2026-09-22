@@ -46,7 +46,7 @@
 #     MAX_ACCEL_RAD_S2=150
 #     STEPS_PER_STAGE=100000
 #     SEED=0
-#     DEVICE=cuda                          # use cpu on macOS laptop
+#     DEVICE=cuda:1                       # use cpu on macOS laptop
 #     DR_LAG_TAU_MIN_S2=0.000              # stage 2 lower bound (s)
 #     DR_LAG_TAU_MAX_S2=0.030              # stage 2 upper bound (s)
 #     DR_LAG_TAU_MIN_S3=0.010              # stage 3 lower bound (s) — centres around 20 ms
@@ -60,13 +60,13 @@ set -euo pipefail
 PREFIX="${1:-curriculum}"
 SEED="${SEED:-0}"
 STEPS_PER_STAGE="${STEPS_PER_STAGE:-1000000}"
-DEVICE="${DEVICE:-cpu}"
+DEVICE="${DEVICE:-cuda:1}"
 CONTROL_FREQ="${CONTROL_FREQ:-40}"
 MAX_ACCEL_RAD_S2="${MAX_ACCEL_RAD_S2:-150}"
 DR_LAG_TAU_MIN_S2="${DR_LAG_TAU_MIN_S2:-0.000}"
-DR_LAG_TAU_MAX_S2="${DR_LAG_TAU_MAX_S2:-0.030}"
-DR_LAG_TAU_MIN_S3="${DR_LAG_TAU_MIN_S3:-0.010}"
-DR_LAG_TAU_MAX_S3="${DR_LAG_TAU_MAX_S3:-0.030}"
+DR_LAG_TAU_MAX_S2="${DR_LAG_TAU_MAX_S2:-0.040}"
+DR_LAG_TAU_MIN_S3="${DR_LAG_TAU_MIN_S3:-0.020}"
+DR_LAG_TAU_MAX_S3="${DR_LAG_TAU_MAX_S3:-0.040}"
 REWARD_ACTION_RATE_WEIGHT="${REWARD_ACTION_RATE_WEIGHT:-0.02}"
 REWARD_MOTOR_JERK_WEIGHT="${REWARD_MOTOR_JERK_WEIGHT:-0.01}"
 REWARD_STILLNESS_BONUS_WEIGHT="${REWARD_STILLNESS_BONUS_WEIGHT:-}"
