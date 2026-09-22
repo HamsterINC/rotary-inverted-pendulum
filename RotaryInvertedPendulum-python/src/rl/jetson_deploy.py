@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from JetsonPWM import JetsonPWM
 
+from stable_baselines3 import PPO
+
 SB3_ZIP_PATH = "./Saved_runs/2209-3.zip"
 
 # ==========================================
@@ -171,6 +173,10 @@ def cpu_control_loop(model: nn.Module):
     prev_pend_ticks = -read_raw_ticks(spi_pendulum)
     action = 0.0
 
+    model = PPO.load("ppo_arm.zip")
+    policy_net = model.policy
+    policy_net.eval()   
+
     print("[CPU Thread] Starting 40 Hz NN loop.")
 
     with torch.no_grad():
@@ -237,8 +243,9 @@ def cpu_control_loop(model: nn.Module):
                 device="cpu",
             )
 
+            action, _ = model.policy.predict(features, deterministic=True)
             # 4. NN inference
-            action = float(model(features).item())
+            # action = float(model(features).item())
             action = max(-1.0, min(1.0, action))
             
             # 5. NN action -> acceleration.
