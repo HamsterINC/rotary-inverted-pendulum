@@ -114,7 +114,7 @@ def read_raw_ticks(spi_device) -> int:
     return raw & 0x3FFF
 
 def process_encoder(current_ticks: int, prev_ticks: int):
-    norm_angle = (current_ticks + 5000) / 8192
+    norm_angle = (-current_ticks - 5000) / 8192
     norm_angle = (norm_angle + 1.0) % 2.0 - 1.0
     angle_rad = norm_angle * math.pi
 
@@ -227,8 +227,8 @@ def cpu_control_loop(model: nn.Module):
             features = torch.tensor(
                 [[
                     norm_arm_pos,
-                    math.cos(-pend_rad),
-                    math.sin(-pend_rad),
+                    math.cos(pend_rad),
+                    math.sin(pend_rad),
                     norm_arm_vel,
                     norm_pend_vel,
                     action,
