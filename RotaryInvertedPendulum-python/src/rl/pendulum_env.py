@@ -804,7 +804,6 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         phi = phi + self._theta_bias_rad
         theta = _wrap_pi(phi - math.pi)
-        print(theta)
 
         # --- Continuous trigonometric encoding for the pendulum angle ---
         cos_theta = math.cos(theta)
