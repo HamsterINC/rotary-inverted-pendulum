@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from JetsonPWM import JetsonPWM
 
-SB3_ZIP_PATH = "./Saved_runs/2209-4.zip"
+SB3_ZIP_PATH = "./Saved_runs/2209-3.zip"
 
 # ==========================================
 # Timing Constants
@@ -114,7 +114,7 @@ def read_raw_ticks(spi_device) -> int:
     return raw & 0x3FFF
 
 def process_encoder(current_ticks: int, prev_ticks: int):
-    norm_angle = (-current_ticks - 5000) / 8192
+    norm_angle = (current_ticks - 5000) / 8192
     norm_angle = (norm_angle + 1.0) % 2.0 - 1.0
     angle_rad = norm_angle * math.pi
 
@@ -168,7 +168,7 @@ def cpu_control_loop(model: nn.Module):
     global shared_accel_cmd
 
     prev_arm_steps = 0
-    prev_pend_ticks = read_raw_ticks(spi_pendulum)
+    prev_pend_ticks = -read_raw_ticks(spi_pendulum)
     action = 0.0
 
     print("[CPU Thread] Starting 40 Hz NN loop.")
@@ -208,20 +208,20 @@ def cpu_control_loop(model: nn.Module):
             arm_pos_rad = observed_arm_steps * ARM_RAD_PER_STEP
 
             # 2. Pendulum observations
-            pend_ticks = read_raw_ticks(spi_pendulum)
+            pend_ticks = -read_raw_ticks(spi_pendulum)
             pend_rad, norm_pend_vel, norm_angle_pend = process_encoder(
                 pend_ticks,
                 prev_pend_ticks,
             )
             prev_pend_ticks = pend_ticks
 
-            #print(
-            #    f"Pend Pos: {pend_rad:.4f} rad | "
-            #    f"Pend Vel: {norm_pend_vel:.4f} (norm)"
-            #    f"Arm Pos: {norm_arm_pos:.4f} norm "
-            #    f"Arm Vel: {norm_arm_vel:.4f} norm "
-            #    f"F_prev: {action:.4f} "
-            #)
+            print(
+                f"Pend Pos: {pend_rad:.4f} rad | "
+                f"Pend Vel: {norm_pend_vel:.4f} (norm)"
+                f"Arm Pos: {norm_arm_pos:.4f} norm "
+                f"Arm Vel: {norm_arm_vel:.4f} norm "
+                f"F_prev: {action:.4f} "
+            )
 
             # 3. Observation tensor
             features = torch.tensor(
@@ -240,7 +240,7 @@ def cpu_control_loop(model: nn.Module):
             # 4. NN inference
             action = float(model(features).item())
             action = max(-1.0, min(1.0, action))
-
+            
             # 5. NN action -> acceleration.
             #
             # IMPORTANT:
