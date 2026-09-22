@@ -17,7 +17,7 @@ from JetsonPWM import JetsonPWM
 
 from stable_baselines3 import PPO
 
-SB3_ZIP_PATH = "./Saved_runs/2209-3.zip"
+SB3_ZIP_PATH = "./Saved_runs/2209-4.zip"
 
 # ==========================================
 # Timing Constants
@@ -38,7 +38,7 @@ ARM_MAX_SAFE_STEPS = int(ARM_SAFE_LIMIT_RAD / ARM_RAD_PER_STEP)
 
 # Kinematic Envelopes (Directly from sim env)
 MAX_ACCEL_RAD_S2 = 150.0
-MAX_VELOCITY_RAD_S = 5.0
+MAX_VELOCITY_RAD_S = 10.0
 ARM_MAX_DELTA_STEPS = (MAX_VELOCITY_RAD_S / ARM_RAD_PER_STEP) * PERIOD
 
 PWM_MIN_FREQ_HZ = 40.0
@@ -173,7 +173,7 @@ def cpu_control_loop(model: nn.Module):
     prev_pend_ticks = -read_raw_ticks(spi_pendulum)
     action = 0.0
 
-    model = PPO.load("ppo_arm.zip")
+    model = PPO.load(SB3_ZIP_PATH)
     policy_net = model.policy
     policy_net.eval()   
 
@@ -221,13 +221,13 @@ def cpu_control_loop(model: nn.Module):
             )
             prev_pend_ticks = pend_ticks
 
-            print(
-                f"Pend Pos: {pend_rad:.4f} rad | "
-                f"Pend Vel: {norm_pend_vel:.4f} (norm)"
-                f"Arm Pos: {norm_arm_pos:.4f} norm "
-                f"Arm Vel: {norm_arm_vel:.4f} norm "
-                f"F_prev: {action:.4f} "
-            )
+            #print(
+            #    f"Pend Pos: {pend_rad:.4f} rad | "
+            #    f"Pend Vel: {norm_pend_vel:.4f} (norm)"
+            #    f"Arm Pos: {norm_arm_pos:.4f} norm "
+            #    f"Arm Vel: {norm_arm_vel:.4f} norm "
+                #f"F_prev: {action:.4f} "
+            #)
 
             # 3. Observation tensor
             features = torch.tensor(
@@ -244,9 +244,11 @@ def cpu_control_loop(model: nn.Module):
             )
 
             action, _ = model.policy.predict(features, deterministic=True)
+            action = action[0]
+
             # 4. NN inference
             # action = float(model(features).item())
-            action = max(-1.0, min(1.0, action))
+            action = max(-1.0, min(1.0, action[0]))
             
             # 5. NN action -> acceleration.
             #
@@ -266,23 +268,23 @@ def cpu_control_loop(model: nn.Module):
             log_buffer.append({
                 "timestamp_s": round(
                     loop_start - t_start_session,
-                    5,
+                    10,
                 ),
-                "arm_pos_rad": round(arm_pos_rad, 4),
+                "arm_pos_rad": round(arm_pos_rad, 10),
                 "arm_actual_vel_rad_s": round(
-                    physical_arm_vel_rad_s,
-                    4,
+                    norm_arm_vel,
+                    10,
                 ),
                 "pendulum_pos_rad": round(
                     pend_rad,
-                    4,
+                    10,
                 ),
                 "pendulum_vel_rad_s": round(
                     norm_pend_vel,
-                    4,
+                    10,
                 ),
-                "action_cmd": round(action, 4),
-                "acceleration_cmd_rad_s2": round(accel_cmd, 4),
+                "action_cmd": round(float(action), 10),
+                "acceleration_cmd_rad_s2": round(float(accel_cmd), 10),
             })
 
             # 7. 40 Hz timing
