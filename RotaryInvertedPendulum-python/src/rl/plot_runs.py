@@ -1,118 +1,123 @@
 import matplotlib.pyplot as plt
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-# Load the data (assuming you saved the text above into a file named 'data.csv')
+# Load the data
 df = pd.read_csv("logs/telemetry_run_with_sim.csv")
 
-# Create the plot
-plt.figure(figsize=(10, 6))
-plt.plot(
+# Compute derivative columns upfront
+df["sim_pole_vel_calc"] = np.gradient(df["sim_cart_pos"], df["time_s"])
+df["sim_pole_acc_calc"] = np.gradient(df["sim_pole_vel_calc"], df["time_s"])
+df["arm_acc_rad_s2"] = np.gradient(df["arm_vel_rad_s"], df["time_s"])
+
+# Create a figure with 1 row and 3 columns side-by-side
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+# ==========================================
+# 1. First Plot: Positions
+# ==========================================
+axes[0].plot(
     df["arm_pos_rad"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="b",
+    label="Arm Pos",
 )
-plt.plot(
+axes[0].plot(
     df["sim_cart_pos"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="r",
+    label="Sim Cart",
+)
+axes[0].plot(
+    df["control_action"],
+    marker="o",
+    linestyle="-",
+    markersize=3,
+    color="g",
+    label="Control",
 )
 
-# Add titles and labels
-plt.title("Arm Position vs. Simulated Pole Angle", fontsize=14)
-plt.xlabel("Arm Position (rad) [arm_pos_rad]", fontsize=12)
-plt.ylabel("Simulated Pole Angle (rad) [sim_pole_angle]", fontsize=12)
+axes[0].set_title("Positions", fontsize=14)
+axes[0].set_xlabel("Sample Index", fontsize=12)
+axes[0].set_ylabel("Position Value", fontsize=12)
+axes[0].grid(True, linestyle="--", alpha=0.6)
+axes[0].legend()
 
-# Add grid for readability
-plt.grid(True, linestyle="--", alpha=0.6)
 
-# Display the plot
-plt.tight_layout()
-plt.show()
-
-# Load the data (assuming you saved the text above into a file named 'data.csv')
-df["sim_pole_vel_calc"] = np.gradient(df["sim_cart_pos"], df["time_s"])
-
-# Create the plot
-plt.figure(figsize=(10, 6))
-plt.plot(
+# ==========================================
+# 2. Second Plot: Velocities
+# ==========================================
+axes[1].plot(
     df["arm_vel_rad_s"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="b",
+    label="Arm Vel",
 )
-plt.plot(
+axes[1].plot(
     df["sim_pole_vel_calc"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="r",
+    label="Sim Pole Vel",
 )
-
-plt.plot(
-    df["control_action"],
+axes[1].plot(
+    df["control_action"] * 10,
     marker="o",
     linestyle="-",
     markersize=3,
     color="g",
+    label="Control x10",
 )
 
-# Add titles and labels
-plt.title("Arm Position vs. Simulated Pole Angle", fontsize=14)
-plt.xlabel("Arm Velocity (rad) [arm_pos_rad]", fontsize=12)
-plt.ylabel("Simulated Pole Velocity (rad) [sim_pole_vel]", fontsize=12)
-
-# Add grid for readability
-plt.grid(True, linestyle="--", alpha=0.6)
-
-# Display the plot
-plt.tight_layout()
-plt.show()
+axes[1].set_title("Velocities", fontsize=14)
+axes[1].set_xlabel("Sample Index", fontsize=12)
+axes[1].set_ylabel("Velocity Value", fontsize=12)
+axes[1].grid(True, linestyle="--", alpha=0.6)
+axes[1].legend()
 
 
-# Load the data (assuming you saved the text above into a file named 'data.csv')
-df["sim_pole_acc_calc"] = np.gradient(df["sim_pole_vel_calc"], df["time_s"])
-df["arm_acc_rad_s2"] = np.gradient(df["arm_vel_rad_s"], df["time_s"])
-
-# Create the plot
-plt.figure(figsize=(10, 6))
-plt.plot(
+# ==========================================
+# 3. Third Plot: Accelerations
+# ==========================================
+axes[2].plot(
     df["arm_acc_rad_s2"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="b",
+    label="Arm Acc",
 )
-plt.plot(
+axes[2].plot(
     df["sim_pole_acc_calc"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="r",
+    label="Sim Pole Acc",
 )
-
-plt.plot(
-    df["control_action"],
+axes[2].plot(
+    df["control_action"] * 100,
     marker="o",
     linestyle="-",
     markersize=3,
     color="g",
+    label="Control x100",
 )
 
+axes[2].set_title("Accelerations", fontsize=14)
+axes[2].set_xlabel("Sample Index", fontsize=12)
+axes[2].set_ylabel("Acceleration Value", fontsize=12)
+axes[2].grid(True, linestyle="--", alpha=0.6)
+axes[2].legend()
 
-# Add titles and labels
-plt.title("control_action", fontsize=14)
-plt.xlabel("Arm Position (rad) [arm_pos_rad]", fontsize=12)
-plt.ylabel("Simulated Pole Angle (rad) [sim_pole_angle]", fontsize=12)
 
-# Add grid for readability
-plt.grid(True, linestyle="--", alpha=0.6)
-
-# Display the plot
+# Display all subplots together
 plt.tight_layout()
 plt.show()

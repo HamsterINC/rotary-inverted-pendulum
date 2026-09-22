@@ -12,7 +12,7 @@
 
     <body name="arm" pos="0 0 0">
       <joint name="motor_joint" type="hinge" axis="0 0 1"
-             range="-2.356194490192345 2.356194490192345" limited="true"
+             range="-3.181661564992912 3.181661564992912" limited="true"
              damping="0.00001" frictionloss="0"/>
       <inertial pos="0.0398571 0 0" mass="0.0367867"
                 diaginertia="1e-6 1.83441e-05 1.83441e-05"/>
@@ -38,6 +38,6 @@
   <actuator>
     <position name="motor" joint="motor_joint"
               kp="100.0" kv="0.23356877426929817"
-              ctrlrange="-2.181661564992912 2.181661564992912"/>
+              ctrlrange="-3.181661564992912 3.181661564992912"/>
   </actuator>
 </mujoco>

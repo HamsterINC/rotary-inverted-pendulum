@@ -804,13 +804,14 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         phi = phi + self._theta_bias_rad
         theta = _wrap_pi(phi - math.pi)
+        print(theta)
 
         # --- Continuous trigonometric encoding for the pendulum angle ---
         cos_theta = math.cos(theta)
         sin_theta = math.sin(theta)
 
         # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
-        motor_pos_norm = np.clip(motor_pos, -1.0, 1.0)
+        motor_pos_norm = np.clip(motor_pos/ np.pi, -1.0, 1.0)
         motor_vel_norm = np.clip(motor_vel / self.max_velocity_rad_s, -1.0, 1.0)
         pen_vel_norm   = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
         prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)

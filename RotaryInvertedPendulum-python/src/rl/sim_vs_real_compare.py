@@ -14,14 +14,14 @@ from pendulum_env import RotaryInvertedPendulumEnv
 # Configuration
 # =====================================================================
 MAX_ACCEL_RAD_S2 = 150.0
-MOTOR_MAX_ACCEL_RAD_S2 = 150.0
+MOTOR_MAX_ACCEL_RAD_S2 = 100.0
 MAX_VELOCITY_RAD_S = 10.0
-MOTOR_SAFE_LIMIT_RAD = 1.2
-SLOWDOWN_FACTOR = 4.0
+MOTOR_SAFE_LIMIT_RAD = 3
+SLOWDOWN_FACTOR = 10.0
 
 FPGA = False
-action_lag_tau_s = 0.001
-action_delay_steps = 1
+action_lag_tau_s = 0.04
+action_delay_steps = 0
 
 CSV_FILE = "logs/run_20260921_181307.csv"
 OUTPUT_CSV = "logs/telemetry_run_with_sim.csv"
@@ -117,8 +117,8 @@ def inject_visual_ghosts(xml_path: str, ghost_defs: list[dict]) -> str:
             # 3. Inject identified low-damping only on the dynamic ghost's pendulum joint
             elif elem.tag == "joint":
                 if is_dynamic and "pendulum_joint" in elem.attrib.get("name", ""):
-                    elem.set("damping", "5.17e-6")
-                    elem.set("frictionloss", "8.76e-8")
+                    elem.set("damping", "5.75086e-06")
+                    elem.set("frictionloss", "7.74722e-08")
 
             elif elem.tag in ("site", "camera", "light"):
                 elem.set("name", f"{prefix}_{elem.attrib['name']}")
@@ -264,13 +264,17 @@ with mujoco.viewer.launch_passive(model_comp, data_comp) as viewer:
         # -------------------------------------------------------------
         # 1. Closed-Loop Policy Step (via Canonical Gym Env)
         # -------------------------------------------------------------
-        action, _ = policy.predict(obs, deterministic=True)
+        action, _= policy.predict(obs, deterministic=True) #= float(row["control_action"])
         obs, reward, terminated, truncated, _ = env.step(action)
+        print(obs)
 
         # -------------------------------------------------------------
         # 2. Open-Loop Stepper Replay Step
         # -------------------------------------------------------------
-        cmd_sim = float(row["control_action"])
+        if i < 5:
+            cmd_sim = 0.0
+        else :
+            cmd_sim = float(row["control_action"])
         filtered_sim_action = action_handler_sim.process_action(cmd_sim)
         accel_sim = np.clip(filtered_sim_action * MAX_ACCEL_RAD_S2, -MOTOR_MAX_ACCEL_RAD_S2, MOTOR_MAX_ACCEL_RAD_S2)
         sim_motor_vel = float(np.clip(sim_motor_vel + accel_sim * actual_dt_s, -MAX_VELOCITY_RAD_S, MAX_VELOCITY_RAD_S))

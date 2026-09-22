@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from JetsonPWM import JetsonPWM
 
-SB3_ZIP_PATH = "./Saved_runs/2109.zip"
+SB3_ZIP_PATH = "./Saved_runs/1509.zip"
 
 # ==========================================
 # Timing Constants
@@ -27,7 +27,7 @@ PERIOD = 1.0 / TARGET_HZ  # 0.025 s
 # ==========================================
 # Stepper / Arm Step-Tracking Constants
 # ==========================================
-STEPS_PER_REV = 12800
+STEPS_PER_REV = 3200
 ARM_RAD_PER_STEP = (2.0 * math.pi) / STEPS_PER_REV
 
 # Safety hard limits (±125 deg = 2.18166 rad)
@@ -35,7 +35,7 @@ ARM_SAFE_LIMIT_RAD = math.radians(125.0)
 ARM_MAX_SAFE_STEPS = int(ARM_SAFE_LIMIT_RAD / ARM_RAD_PER_STEP)
 
 # Kinematic Envelopes (Directly from sim env)
-MAX_ACCEL_RAD_S2 = 50.0
+MAX_ACCEL_RAD_S2 = 150.0
 MAX_VELOCITY_RAD_S = 5.0
 ARM_MAX_DELTA_STEPS = (MAX_VELOCITY_RAD_S / ARM_RAD_PER_STEP) * PERIOD
 
@@ -119,6 +119,10 @@ def process_encoder(current_ticks: int, prev_ticks: int):
     angle_rad = norm_angle * math.pi
 
     delta = current_ticks - prev_ticks
+    if delta > 8192:
+        delta -= 16384
+    elif delta < -8192:
+        delta += 16384
     norm_vel = delta / float(PEND_MAX_DELTA_TICKS)
     norm_vel = max(-1.0, min(1.0, norm_vel))
 
@@ -212,18 +216,18 @@ def cpu_control_loop(model: nn.Module):
             prev_pend_ticks = pend_ticks
 
             print(
-                f"Pend Pos: {norm_angle_pend:.4f} rad | "
+                f"Pend Pos: {pend_rad:.4f} rad | "
                 f"Pend Vel: {norm_pend_vel:.4f} (norm)"
             )
 
             # 3. Observation tensor
             features = torch.tensor(
                 [[
-                    norm_arm_pos,
-                    math.cos(pend_rad),
-                    math.sin(pend_rad),
+                    norm_arm_pos*math.pi,
+                    math.cos(-pend_rad),
+                    math.sin(-pend_rad),
                     norm_arm_vel,
-                    -norm_pend_vel,
+                    norm_pend_vel,
                     action,
                 ]],
                 dtype=torch.float32,
@@ -260,7 +264,7 @@ def cpu_control_loop(model: nn.Module):
                     4,
                 ),
                 "pendulum_pos_rad": round(
-                    norm_angle_pend,
+                    pend_rad,
                     4,
                 ),
                 "pendulum_vel_rad_s": round(
@@ -533,6 +537,7 @@ if __name__ == "__main__":
         control_thread.join()
         step_thread.join()
 
+        GPIO.setup(EN_PIN, GPIO.HIGH)  # Disable stepper driver
         GPIO.cleanup()
         spi_pendulum.close()
         save_log_to_file()
