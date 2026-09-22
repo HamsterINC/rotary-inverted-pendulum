@@ -52,8 +52,8 @@ DEFAULT_PARAMS_PATH = HERE / "sysid_params.json"
 
 # Hard-stop on the motor joint. Matches the lid-boss mechanical limit of ±135°,
 # but we clamp the policy at ±125° so the policy never *commands* a stop hit.
-MOTOR_LIMIT_RAD = math.radians(135.0)
-MOTOR_SAFE_LIMIT_RAD = math.radians(125.0)
+MOTOR_LIMIT_RAD = math.radians(145.0)
+MOTOR_SAFE_LIMIT_RAD = math.radians(145.0)
 
 # Arm geometry, measured 2026-05-02 against the OnShape CAD + a kitchen
 # scale. The arm is 65 mm from the stepper shaft to the pendulum joint

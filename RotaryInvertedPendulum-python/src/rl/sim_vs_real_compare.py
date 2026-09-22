@@ -14,13 +14,13 @@ from pendulum_env import RotaryInvertedPendulumEnv
 # Configuration
 # =====================================================================
 MAX_ACCEL_RAD_S2 = 150.0
-MOTOR_MAX_ACCEL_RAD_S2 = 100.0
+MOTOR_MAX_ACCEL_RAD_S2 = 150.0
 MAX_VELOCITY_RAD_S = 10.0
 MOTOR_SAFE_LIMIT_RAD = 3
 SLOWDOWN_FACTOR = 10.0
 
 FPGA = False
-action_lag_tau_s = 0.04
+action_lag_tau_s = 0.05
 action_delay_steps = 0
 
 CSV_FILE = "logs/run_20260921_181307.csv"
@@ -172,8 +172,10 @@ env = RotaryInvertedPendulumEnv(
     control_freq_hz=40.0,
     max_accel_rad_s2=MAX_ACCEL_RAD_S2,
     max_velocity_rad_s=MAX_VELOCITY_RAD_S,
+    action_delay_steps=1,
     domain_randomization=False,
     dr_theta_bias_max_rad=0.0,
+    action_lag_tau_s=0.03,
 )
 
 obs, _ = env.reset(seed=0)
@@ -264,9 +266,13 @@ with mujoco.viewer.launch_passive(model_comp, data_comp) as viewer:
         # -------------------------------------------------------------
         # 1. Closed-Loop Policy Step (via Canonical Gym Env)
         # -------------------------------------------------------------
-        action, _= policy.predict(obs, deterministic=True) #= float(row["control_action"])
+        if i < 5:
+            action = 0.0
+        else :
+            action = float(row["control_action"])
+            #action, _= policy.predict(obs, deterministic=True)
+        #action, _= policy.predict(obs, deterministic=True) 
         obs, reward, terminated, truncated, _ = env.step(action)
-        print(obs)
 
         # -------------------------------------------------------------
         # 2. Open-Loop Stepper Replay Step

@@ -9,6 +9,8 @@ df = pd.read_csv("logs/telemetry_run_with_sim.csv")
 df["sim_pole_vel_calc"] = np.gradient(df["sim_cart_pos"], df["time_s"])
 df["sim_pole_acc_calc"] = np.gradient(df["sim_pole_vel_calc"], df["time_s"])
 df["arm_acc_rad_s2"] = np.gradient(df["arm_vel_rad_s"], df["time_s"])
+df["env_pole_vel_calc"] = np.gradient(df["env_cart_pos"], df["time_s"])
+df["env_pole_acc_calc"] = np.gradient(df["env_pole_vel_calc"], df["time_s"])
 
 # Create a figure with 1 row and 3 columns side-by-side
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -33,11 +35,19 @@ axes[0].plot(
     label="Sim Cart",
 )
 axes[0].plot(
-    df["control_action"],
+    df["env_cart_pos"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="g",
+    label="Env Cart",
+)
+axes[0].plot(
+    df["control_action"],
+    marker="o",
+    linestyle="-",
+    markersize=3,
+    color="orange",
     label="Control",
 )
 
@@ -68,11 +78,19 @@ axes[1].plot(
     label="Sim Pole Vel",
 )
 axes[1].plot(
-    df["control_action"] * 10,
+    df["env_pole_vel_calc"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="g",
+    label="Env Pole Vel",
+)
+axes[1].plot(
+    df["control_action"] * 10,
+    marker="o",
+    linestyle="-",
+    markersize=3,
+    color="orange",
     label="Control x10",
 )
 
@@ -103,11 +121,19 @@ axes[2].plot(
     label="Sim Pole Acc",
 )
 axes[2].plot(
-    df["control_action"] * 100,
+    df["env_pole_acc_calc"],
     marker="o",
     linestyle="-",
     markersize=3,
     color="g",
+    label="Env Pole Vel",
+)
+axes[2].plot(
+    df["control_action"] * 100,
+    marker="o",
+    linestyle="-",
+    markersize=3,
+    color="orange",
     label="Control x100",
 )
 
