@@ -815,7 +815,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         pen_vel_norm   = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
         prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)
         
-        print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
+        # print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
         return np.array(
             [
                 motor_pos_norm,
