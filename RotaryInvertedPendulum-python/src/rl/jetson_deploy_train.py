@@ -39,7 +39,7 @@ PEND_MAX_DELTA_TICKS = (MAX_PENDULUM_VEL_RAD_S / PEND_LSB_RAD) * PERIOD
 DIR_PIN = 16
 EN_PIN = 22
 
-SB3_ZIP_PATH = "./Saved_runs/2209-3.zip"
+SB3_ZIP_PATH = "./Saved_runs/2509-2.zip"
 
 # ==========================================
 # Shared Hardware State (Used by Background Thread)
@@ -188,7 +188,7 @@ def step_update_loop():
             # the commanded position has changed.
             # ------------------------------------------------------
             if step_error != 0:
-                is_forward = step_error > 0
+                is_forward = step_error < 0
 
                 GPIO.output(
                     DIR_PIN,
@@ -412,7 +412,7 @@ if __name__ == "__main__":
         # 5. Start real-world training!
         print("\nStarting Real-World Training...")
         # Note: 10,000 steps at 40Hz is ~4 minutes of real-world continuous time
-        model.learn(total_timesteps=10000, reset_num_timesteps=False)
+        model.learn(total_timesteps=1000, reset_num_timesteps=False)
 
         # 6. Save the newly fine-tuned model
         save_path = "./Saved_runs/real_world_finetuned.zip"
