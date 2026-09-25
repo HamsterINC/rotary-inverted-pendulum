@@ -1,4 +1,5 @@
 from collections import deque
+import math
 from pathlib import Path
 import time
 import xml.etree.ElementTree as ET
@@ -7,6 +8,7 @@ import mujoco.viewer
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
+import torch
 
 from pendulum_env import RotaryInvertedPendulumEnv
 
@@ -17,15 +19,15 @@ MAX_ACCEL_RAD_S2 = 150.0
 MOTOR_MAX_ACCEL_RAD_S2 = 150.0
 MAX_VELOCITY_RAD_S = 10.0
 MOTOR_SAFE_LIMIT_RAD = 3
-SLOWDOWN_FACTOR = 10.0
+SLOWDOWN_FACTOR = 1.0
 
 FPGA = False
 action_lag_tau_s = 0.05
 action_delay_steps = 0
 
-CSV_FILE = "logs/run_20260921_181307.csv"
+CSV_FILE = "logs/run_20260925_094638.csv"
 OUTPUT_CSV = "logs/telemetry_run_with_sim.csv"
-SB3_ZIP_PATH = "Saved_runs/1509.zip"
+SB3_ZIP_PATH = "Saved_runs/2209-4.zip"
 
 
 # =====================================================================
@@ -133,7 +135,7 @@ def inject_visual_ghosts(xml_path: str, ghost_defs: list[dict]) -> str:
                 {
                     "name": f"{prefix}_actuator",
                     "joint": f"{prefix}_motor_joint",
-                    "kp": "100",
+                    "kp": "200",
                     "kv": "0.23",
                     "ctrlrange": "-10 10",
                 },
@@ -161,7 +163,7 @@ else:
         }
     )
 
-raw_angles_rad = df["pendulum_angle_rad"].to_numpy() * np.pi + np.pi
+raw_angles_rad = df["pendulum_angle_rad"].to_numpy() + np.pi
 angle_rad_motor = df["arm_pos_rad"].to_numpy() 
 
 df["pendulum_angle_unwrapped"] = np.unwrap(raw_angles_rad)
@@ -172,10 +174,10 @@ env = RotaryInvertedPendulumEnv(
     control_freq_hz=40.0,
     max_accel_rad_s2=MAX_ACCEL_RAD_S2,
     max_velocity_rad_s=MAX_VELOCITY_RAD_S,
-    action_delay_steps=1,
+    action_delay_steps=0,
     domain_randomization=False,
     dr_theta_bias_max_rad=0.0,
-    action_lag_tau_s=0.03,
+    action_lag_tau_s=0.05,
 )
 
 obs, _ = env.reset(seed=0)
@@ -233,7 +235,9 @@ data_comp.ctrl[dyn_act_idx] = init_cart
 mujoco.mj_forward(model_comp, data_comp)
 
 # 3. Load SB3 Policy
-policy = PPO.load(SB3_ZIP_PATH, device="cpu")
+model = PPO.load(SB3_ZIP_PATH, device="cpu")
+policy = model.policy
+policy.eval()   
 
 sim_motor_vel = 0.0
 sim_motor_target = init_cart
@@ -252,94 +256,141 @@ pol_action = []
 with mujoco.viewer.launch_passive(model_comp, data_comp) as viewer:
     print("Viewer running: [Default: Replay Sim] | [Green: HW Replay] | [Cyan: PPO Env] | [Orange: HW Arm + Sim Pole]")
 
-    for i in range(len(df)):
-        if not viewer.is_running():
-            break
+    # for i in range(len(df)):
+    #     if not viewer.is_running():
+    #         break
 
-        step_start = time.time()
-        row = df.iloc[i]
+    #     step_start = time.time()
+    #     row = df.iloc[i]
 
-        actual_dt_s = row["time_s"] - df["time_s"].iloc[i - 1] if i > 0 else 0.025
-        if actual_dt_s <= 0:
-            actual_dt_s = 0.025
+    #     actual_dt_s = row["time_s"] - df["time_s"].iloc[i - 1] if i > 0 else 0.025
+    #     if actual_dt_s <= 0:
+    #         actual_dt_s = 0.025
 
-        # -------------------------------------------------------------
-        # 1. Closed-Loop Policy Step (via Canonical Gym Env)
-        # -------------------------------------------------------------
-        if i < 5:
-            action = 0.0
-        else :
-            action = float(row["control_action"])
-            #action, _= policy.predict(obs, deterministic=True)
-        #action, _= policy.predict(obs, deterministic=True) 
-        obs, reward, terminated, truncated, _ = env.step(action)
+    #     # -------------------------------------------------------------
+    #     # 1. Closed-Loop Policy Step (via Canonical Gym Env)
+    #     # -------------------------------------------------------------
+    #     if i < 4:
+    #         row_2 = df.iloc[i]
+    #         action = 0.0
+    #         action_2 = 0.0
+    #     else :
+    #         row_2 = df.iloc[i-1]
+    #         # env.data.qpos[env._motor_qpos_addr] = float(row["arm_pos_rad"])
+    #         # env.data.qpos[env._pen_qpos_addr] = float(row["pendulum_angle_unwrapped"])
 
-        # -------------------------------------------------------------
-        # 2. Open-Loop Stepper Replay Step
-        # -------------------------------------------------------------
-        if i < 5:
-            cmd_sim = 0.0
-        else :
-            cmd_sim = float(row["control_action"])
-        filtered_sim_action = action_handler_sim.process_action(cmd_sim)
-        accel_sim = np.clip(filtered_sim_action * MAX_ACCEL_RAD_S2, -MOTOR_MAX_ACCEL_RAD_S2, MOTOR_MAX_ACCEL_RAD_S2)
-        sim_motor_vel = float(np.clip(sim_motor_vel + accel_sim * actual_dt_s, -MAX_VELOCITY_RAD_S, MAX_VELOCITY_RAD_S))
+    #         # # Add velocities if they exist in your CSV
+    #         # env.data.qvel[env._motor_qvel_addr] = float(row["arm_vel_rad_s"])
+    #         # env.data.qvel[env._pen_qvel_addr] = float(row["pendulum_vel_rad_s"])
+    #         # env._prev_action = float(row_2["control_action"])
+    #         # telemetry_obs = env._obs()
+    #         print(float(row["pendulum_angle_rad"]))
+    #         telemetry_obs = np.array(
+    #         [
+    #             float(row["arm_pos_rad"]),
+    #             math.cos(row["pendulum_angle_rad"]),
+    #             math.sin(row["pendulum_angle_rad"]),
+    #             float(row["arm_vel_rad_s"]),
+    #             float(row["pendulum_vel_rad_s"]),
+    #             float(row_2["control_action"]),
+    #         ],
+    #                  dtype=np.float32,
+    #         )
+    #         action = float(row["control_action"])
+    #         action_2, _= policy.predict(telemetry_obs, deterministic=True)
+    #         print(f"HW Action: {action:.4f} | Sim Action: {action_2[0]} | Diff: {action - action_2}")
+    #     #action, _= policy.predict(obs, deterministic=True) 
+    #     obs, reward, terminated, truncated, _ = env.step(action_2)
 
-        if (sim_motor_target >= MOTOR_SAFE_LIMIT_RAD and sim_motor_vel > 0.0) or (
-            sim_motor_target <= -MOTOR_SAFE_LIMIT_RAD and sim_motor_vel < 0.0
-        ):
-            sim_motor_vel = 0.0
 
-        sim_motor_target = float(np.clip(sim_motor_target + sim_motor_vel * actual_dt_s, -MOTOR_SAFE_LIMIT_RAD, MOTOR_SAFE_LIMIT_RAD))
-        data_comp.ctrl[sim_act_idx] = sim_motor_target
+    #     # -------------------------------------------------------------
+    #     # 2. Open-Loop Stepper Replay Step
+    #     # -------------------------------------------------------------
+    #     if i < 5:
+    #         cmd_sim = 0.0
+    #     else :
+    #         cmd_sim = float(row["control_action"])
+    #     filtered_sim_action = action_handler_sim.process_action(cmd_sim)
+    #     accel_sim = np.clip(filtered_sim_action * MAX_ACCEL_RAD_S2, -MOTOR_MAX_ACCEL_RAD_S2, MOTOR_MAX_ACCEL_RAD_S2)
+    #     sim_motor_vel = float(np.clip(sim_motor_vel + accel_sim * actual_dt_s, -MAX_VELOCITY_RAD_S, MAX_VELOCITY_RAD_S))
 
-        # -------------------------------------------------------------
-        # 3. Dynamic Physics via PD Actuator Setpoint Ramping
-        # -------------------------------------------------------------
-        target_hw_arm = float(row["arm_pos_rad"])
-        start_hw_arm = float(data_comp.ctrl[dyn_act_idx])
+    #     if (sim_motor_target >= MOTOR_SAFE_LIMIT_RAD and sim_motor_vel > 0.0) or (
+    #         sim_motor_target <= -MOTOR_SAFE_LIMIT_RAD and sim_motor_vel < 0.0
+    #     ):
+    #         sim_motor_vel = 0.0
+
+    #     sim_motor_target = float(np.clip(sim_motor_target + sim_motor_vel * actual_dt_s, -MOTOR_SAFE_LIMIT_RAD, MOTOR_SAFE_LIMIT_RAD))
+    #     data_comp.ctrl[sim_act_idx] = sim_motor_target
+
+    #     # -------------------------------------------------------------
+    #     # 3. Dynamic Physics via PD Actuator Setpoint Ramping
+    #     # -------------------------------------------------------------
+    #     target_hw_arm = float(row["arm_pos_rad"]) * np.pi
+    #     start_hw_arm = float(data_comp.ctrl[dyn_act_idx])
         
-        n_sub = max(1, int(round(actual_dt_s / model_comp.opt.timestep)))
-        for sub_step in range(n_sub):
-            s = (sub_step + 1) / n_sub
-            # Smoothly ramp the actuator setpoint to eliminate impulsive velocity jumps
-            data_comp.ctrl[dyn_act_idx] = start_hw_arm + s * (target_hw_arm - start_hw_arm)
-            mujoco.mj_step(model_comp, data_comp)
+    #     n_sub = max(1, int(round(actual_dt_s / model_comp.opt.timestep)))
+    #     for sub_step in range(n_sub):
+    #         s = (sub_step + 1) / n_sub
+    #         # Smoothly ramp the actuator setpoint to eliminate impulsive velocity jumps
+    #         data_comp.ctrl[dyn_act_idx] = start_hw_arm + s * (target_hw_arm - start_hw_arm)
+    #         mujoco.mj_step(model_comp, data_comp)
 
-        # -------------------------------------------------------------
-        # 4. Synchronize Visual Poses
-        # -------------------------------------------------------------
-        # Hardware Telemetry Ghost (Pure Kinematics from CSV)
-        data_comp.qpos[hw_cart_qpos_idx] = target_hw_arm
-        data_comp.qpos[hw_pole_qpos_idx] = float(row["pendulum_angle_unwrapped"])
+    #     # -------------------------------------------------------------
+    #     # 4. Synchronize Visual Poses
+    #     # -------------------------------------------------------------
+    #     # Hardware Telemetry Ghost (Pure Kinematics from CSV)
+    #     data_comp.qpos[hw_cart_qpos_idx] = target_hw_arm
+    #     data_comp.qpos[hw_pole_qpos_idx] = float(row["pendulum_angle_unwrapped"])
 
-        # PPO Policy Ghost (Mirrored from Gym environment)
-        data_comp.qpos[pol_cart_qpos_idx] = float(env.data.qpos[env._motor_qpos_addr])
-        data_comp.qpos[pol_pole_qpos_idx] = float(env.data.qpos[env._pen_qpos_addr])
 
-        # Dynamic Ghost: arm tracked via PD actuator; pole moved naturally by mj_step
+    #     # PPO Policy Ghost (Mirrored from Gym environment)
+    #     data_comp.qpos[pol_cart_qpos_idx] = float(env.data.qpos[env._motor_qpos_addr])
+    #     data_comp.qpos[pol_pole_qpos_idx] = float(env.data.qpos[env._pen_qpos_addr])
 
-        # Logging traces
-        pol_action.append(float(action))
-        sim_pole_angles.append(float(data_comp.qpos[sim_pole_qpos_idx]) )
-        sim_cart_positions.append(float(data_comp.qpos[sim_cart_qpos_idx]))
-        pol_pole_angles.append(float(env.data.qpos[env._pen_qpos_addr]))
-        pol_cart_positions.append(float(env.data.qpos[env._motor_qpos_addr]))
-        dyn_pole_angles.append(float(data_comp.qpos[dyn_pole_qpos_idx]))
+    #     # Dynamic Ghost: arm tracked via PD actuator; pole moved naturally by mj_step
 
-        mujoco.mj_forward(model_comp, data_comp)
+    #     # Logging traces
+    #     pol_action.append(float(action))
+    #     sim_pole_angles.append(float(data_comp.qpos[sim_pole_qpos_idx]) )
+    #     sim_cart_positions.append(float(data_comp.qpos[sim_cart_qpos_idx]))
+    #     pol_pole_angles.append(float(env.data.qpos[env._pen_qpos_addr]))
+    #     pol_cart_positions.append(float(env.data.qpos[env._motor_qpos_addr]))
+    #     dyn_pole_angles.append(float(data_comp.qpos[dyn_pole_qpos_idx]))
+
+    #     mujoco.mj_forward(model_comp, data_comp)
+    #     viewer.sync()
+    #     arm_err = abs(float(data_comp.qpos[dyn_cart_qpos_idx]) - target_hw_arm)
+    #     if i % 20 == 0:
+    #         print(f"Arm tracking error: {arm_err:.4f} rad ({np.degrees(arm_err):.2f} deg)")
+
+    #     target_frame_time = actual_dt_s * SLOWDOWN_FACTOR
+    #     elapsed = time.time() - step_start
+    #     if elapsed < target_frame_time:
+    #         time.sleep(target_frame_time - elapsed)
+
+# env.close()
+
+
+# Launch the interactive viewer
+with mujoco.viewer.launch_passive(model_comp, data_comp) as viewer:
+    print("Viewer opened! Press 'Space' to pause/unpause.")
+    
+    # Run indefinitely until the window is closed
+    while viewer.is_running():
+        step_start = time.time()
+
+        # Step the physics simulation
+        mujoco.mj_step(model_comp, data_comp)
+
+        # Sync the viewer with the underlying simulation state
         viewer.sync()
-        arm_err = abs(float(data_comp.qpos[dyn_cart_qpos_idx]) - target_hw_arm)
-        if i % 20 == 0:
-            print(f"Arm tracking error: {arm_err:.4f} rad ({np.degrees(arm_err):.2f} deg)")
 
-        target_frame_time = actual_dt_s * SLOWDOWN_FACTOR
-        elapsed = time.time() - step_start
-        if elapsed < target_frame_time:
-            time.sleep(target_frame_time - elapsed)
+        # Keep the simulation running at roughly real-time
+        time_until_next_step = model_comp.opt.timestep - (time.time() - step_start)
+        if time_until_next_step > 0:
+            time.sleep(time_until_next_step)
 
-env.close()
-
+    env.close()
 logged_len = len(sim_pole_angles)
 df_out = df.iloc[:logged_len].copy()
 df_out["sim_cart_pos"] = sim_cart_positions

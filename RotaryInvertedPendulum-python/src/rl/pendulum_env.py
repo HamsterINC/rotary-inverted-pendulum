@@ -69,7 +69,7 @@ GRAVITY = 9.81
 
 # AS5600 encoder resolution.
 
-ENCODER_CPR = 1000
+ENCODER_CPR = 4096
 PENDULUM_LSB_RAD = 2.0 * math.pi / ENCODER_CPR
 # Scaling constants (match these identically on your FPGA pipeline)
 MAX_PENDULUM_VEL_RAD_S = 30.0  # Typical max swing-up velocity
@@ -102,7 +102,7 @@ DR_PENDULUM_FRICTION_MULT_RANGE = (0.5, 2.0)
 # Velocity is the integral of accel, capped at MAX_VELOCITY_RAD_S; position
 # is the integral of velocity, fed to the existing PD position actuator.
 MAX_VELOCITY_RAD_S = 5.0
-MAX_ACCEL_RAD_S2 = 50.0   # bumped from 100 after the first accel-mode
+MAX_ACCEL_RAD_S2 = 150.0   # bumped from 100 after the first accel-mode
                             # deployment showed the policy saturating its
                             # accel command at ±99 repeatedly — needed more
                             # authority. The firmware envelope is much
@@ -808,20 +808,21 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # --- Continuous trigonometric encoding for the pendulum angle ---
         cos_theta = math.cos(theta)
         sin_theta = math.sin(theta)
-
+        
         # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
         motor_pos_norm = np.clip(motor_pos/ np.pi, -1.0, 1.0)
         motor_vel_norm = np.clip(motor_vel / self.max_velocity_rad_s, -1.0, 1.0)
         pen_vel_norm   = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
         prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)
-
+        
+        print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
         return np.array(
             [
                 motor_pos_norm,
                 cos_theta,
                 sin_theta,
                 motor_vel_norm,
-                pen_vel_norm,
+                -pen_vel_norm,
                 prev_act_norm,
             ],
             dtype=np.float32,

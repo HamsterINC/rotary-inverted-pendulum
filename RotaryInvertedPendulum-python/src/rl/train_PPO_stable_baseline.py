@@ -291,7 +291,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="lower bound on action_delay_steps sampled per episode")
     p.add_argument("--dr-delay-max", type=int, default=None,
                    help="upper bound on action_delay_steps. Set this to override env defaults.")
-    p.add_argument("--dr-action-lag-tau-min", type=float, default=0.001,
+    p.add_argument("--dr-action-lag-tau-min", type=float, default=0.05,
                    help="lower bound on first-order action-lag time constant "
                         "(seconds) sampled per episode.")
     p.add_argument("--dr-action-lag-tau-max", type=float, default=None,
@@ -304,7 +304,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "fine-tuning and deployment. 35 Hz is the empirically-best "
                         "operating point for this rig — see "
                         "docs/control_rate_selection.md for the principled selection.")
-    p.add_argument("--max-accel-rad-s2", type=float, default=50.0,
+    p.add_argument("--max-accel-rad-s2", type=float, default=150.0,
                    help="action ∈ [-1, 1] maps to angular accel ∈ [-max, +max]"
                         " rad/s². Default 150 ≈ 76% of the motor's physical "
                         "envelope (~196 rad/s² at 50 kSteps/s²). Bumped from "
@@ -350,7 +350,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "Quanser paper; default None → env default (0.0, "
                         "disabled). Distinct from --reward-action-rate-weight "
                         "(command jerk). Try 0.01 as a gentle starting point.")
-    p.add_argument("--reward-action-rate-weight", type=float, default=0.02,
+    p.add_argument("--reward-action-rate-weight", type=float, default=0.00,
                    help="penalty on (action_t - action_{t-1})² in the reward. "
                         "Default None → env default (0.0; disabled in accel "
                         "mode). Re-enabling with a small value (e.g. 0.02) "
