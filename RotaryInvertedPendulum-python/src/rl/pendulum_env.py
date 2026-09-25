@@ -481,6 +481,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # `_lagged_action` is the filter's internal state, reset each episode.
         self._action_lag_tau_s = 0.0
         self._lagged_action = 0.0
+        self.filtered_arm_vel = 0.0  
+        self.filtered_pen_vel = 0.0
+
 
         # Cache joint addresses (faster than name lookup each step).
         self._motor_qpos_addr = self.model.jnt_qposadr[
@@ -587,6 +590,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self._step_count = 0
         self._prev_action = 0.0
         self._prev_motor_vel = 0.0
+        self.filtered_arm_vel = 0.0  
+        self.filtered_pen_vel = 0.0
         mujoco.mj_forward(self.model, self.data)
         return self._obs(), {}
 
@@ -808,11 +813,15 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # --- Continuous trigonometric encoding for the pendulum angle ---
         cos_theta = math.cos(theta)
         sin_theta = math.sin(theta)
-        
+
+        alpha = 0.2 
+        self.filtered_arm_vel = (alpha * motor_vel) + ((1.0 - alpha) * self.filtered_arm_vel)
+        self.filtered_pend_vel = (alpha * pen_vel) + ((1.0 - alpha) * self.filtered_pen_vel)
+
         # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
         motor_pos_norm = np.clip(motor_pos/ np.pi, -1.0, 1.0)
-        motor_vel_norm = np.clip(motor_vel / self.max_velocity_rad_s, -1.0, 1.0)
-        pen_vel_norm   = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
+        motor_vel_norm = np.clip(self.filtered_arm_vel / self.max_velocity_rad_s, -1.0, 1.0)
+        pen_vel_norm   = np.clip(self.filtered_pend_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
         prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)
         
         # print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
