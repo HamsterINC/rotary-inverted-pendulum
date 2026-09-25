@@ -170,24 +170,75 @@ class RealPendulumEnv(gym.Env):
         super().reset(seed=seed)
         global shared_accel_cmd, arm_current_steps
 
-        # 1. Stop the motor safely
+        print("\n[ENV] Episode finished. Homing arm smoothly to center...")
+        
+        # ==========================================
+        # 1. Homing Sequence (Runs locally in reset)
+        # ==========================================
+        with state_lock:
+            prev_steps = arm_current_steps
+            
+        last_time = time.perf_counter()
+        
+        while True:
+            # Read current state
+            with state_lock:
+                curr_steps = arm_current_steps
+                
+            # Exit condition: We are at center (within 2 steps) AND not moving
+            if abs(curr_steps) <= 2 and curr_steps == prev_steps:
+                break
+                
+            # Calculate accurate time step for velocity estimation
+            curr_time = time.perf_counter()
+            dt = curr_time - last_time
+            if dt <= 0.001: 
+                dt = 0.025
+                
+            # Calculate position and velocity
+            current_pos_rad = curr_steps * ARM_RAD_PER_STEP
+            current_vel_rad_s = ((curr_steps - prev_steps) * ARM_RAD_PER_STEP) / dt
+            
+            # --- PD Controller for Smooth Acceleration ---
+            # Kp (Proportional) acts like a spring pulling the arm to 0.0.
+            # Kd (Derivative) acts like friction, slowing it down so it doesn't overshoot.
+            Kp = 30.0  
+            Kd = 10.0  
+            
+            accel_cmd = (0.0 - current_pos_rad) * Kp - (current_vel_rad_s * Kd)
+            
+            # Cap the homing acceleration to a very gentle 20 rad/s^2 (max is 150)
+            accel_cmd = max(-20.0, min(20.0, accel_cmd))
+            
+            # Send the gentle acceleration command to the background thread
+            with state_lock:
+                shared_accel_cmd = accel_cmd
+                
+            # Update trackers and sleep to run at roughly 40Hz
+            prev_steps = curr_steps
+            last_time = curr_time
+            time.sleep(0.025)
+
+        # ------------------------------------------
+        # 2. Stop completely & let pendulum settle
+        # ------------------------------------------
         with state_lock:
             shared_accel_cmd = 0.0
+
+        print("[ENV] Arm homed! Waiting 3 seconds for pendulum to stop swinging...")
+        time.sleep(3.0)
+
+        # ------------------------------------------
+        # 3. Standard Environment Reset Tracker Update
+        # ------------------------------------------
         self.prev_action = 0.0
         self.step_count = 0
-
-        print("\n[ENV] Episode resetting. Motor stopped.")
-        print("[ENV] Waiting 4 seconds for pendulum to settle at bottom...")
-        
-        # 2. Wait for physical reset (pendulum drops and settles naturally)
-        time.sleep(4.0)
-
-        # 3. Reset internal tracking states
         with state_lock:
             self.prev_arm_steps = arm_current_steps 
+            
         self.prev_pend_ticks = -read_raw_ticks(spi_pendulum)
         
-        # Get initial observation
+        # Get initial observation for the new episode
         obs = self._get_obs(0.0)
         self.next_tick = time.perf_counter() + CONTROL_PERIOD
         
