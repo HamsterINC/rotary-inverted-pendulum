@@ -13,6 +13,8 @@ import spidev
 from JetsonPWM import JetsonPWM
 from stable_baselines3 import PPO
 
+from dataclasses import dataclass
+
 # ==========================================
 # Constants
 # ==========================================
@@ -264,13 +266,25 @@ class RealPendulumEnv(gym.Env):
 
         # 3. Read physical states
         obs = self._get_obs(action_val)
-        arm_pos, cos_p, sin_p, arm_vel, pend_vel, _ = obs
+        arm_pos, cos_p, sin_p, norm_arm_vel, norm_pend_vel, _ = obs
         
-        pend_rad = math.atan2(sin_p, cos_p) 
+        pend_rad = math.atan2(sin_p, cos_p)
+        actual_arm_pos = arm_pos * (STEPS_PER_REV / 2) * ARM_RAD_PER_STEP
+        actual_arm_vel = norm_arm_vel * MAX_VELOCITY_RAD_S
+        actual_pend_vel = norm_pend_vel * MAX_PENDULUM_VEL_RAD_S 
 
         # 4. Calculate Reward 
         # Max reward (+1) when upright, min reward (-1) when hanging straight down.
-        reward = math.cos(pend_rad) - 0.05 * abs(arm_pos) - 0.1 * abs(action_val)
+        reward = compute_reward(
+            theta=pend_rad,
+            pen_vel=actual_pend_vel,
+            motor_pos=actual_arm_pos,
+            motor_vel=actual_arm_vel,
+            action=action_val,
+            prev_action=self.prev_action,
+            prev_motor_vel=self.prev_motor_vel,
+            weights=REWARD_WEIGHTS
+        )
 
         # 5. Determine Termination (Failure conditions)
         terminated = False
@@ -318,6 +332,58 @@ class RealPendulumEnv(gym.Env):
         
         return obs
 
+
+
+@dataclass
+class RewardWeights:
+    k_pen_vel: float = 0.001         # FILL THESE IN WITH YOUR SIM VALUES!
+    k_motor_pos: float = 0.5 
+    k_motor_vel: float = 0.005
+    k_action: float =  0.20
+    k_action_rate: float = 0.02
+    k_motor_jerk: float =  0.01
+    k_stillness_bonus: float = 0.0
+    sigma_theta: float =  0.3 
+    sigma_motor_vel: float =  1.0
+
+# Instantiate your weights
+REWARD_WEIGHTS = RewardWeights()
+
+def compute_reward(
+    *,
+    theta: float,
+    pen_vel: float,
+    motor_pos: float,
+    motor_vel: float,
+    action: float,
+    prev_action: float,
+    prev_motor_vel: float,
+    weights: RewardWeights,
+) -> float:
+    """Exact copy of your sim reward function."""
+    action_delta = action - prev_action
+    motor_vel_delta = motor_vel - prev_motor_vel
+    
+    cost = (
+        theta * theta
+        + weights.k_pen_vel * pen_vel * pen_vel
+        + weights.k_motor_pos * motor_pos * motor_pos
+        + weights.k_motor_vel * motor_vel * motor_vel
+        + weights.k_action * action * action
+        + weights.k_action_rate * action_delta * action_delta
+        + weights.k_motor_jerk * motor_vel_delta * motor_vel_delta
+    )
+    
+    if weights.k_stillness_bonus > 0.0:
+        sigma_theta_sq = weights.sigma_theta * weights.sigma_theta
+        sigma_motor_vel_sq = weights.sigma_motor_vel * weights.sigma_motor_vel
+        upright_score = math.exp(-(theta * theta) / sigma_theta_sq)
+        stillness_score = math.exp(-(motor_vel * motor_vel) / sigma_motor_vel_sq)
+        bonus = weights.k_stillness_bonus * upright_score * stillness_score
+    else:
+        bonus = 0.0
+        
+    return float(bonus - cost)
 # ==========================================
 # Main Training Entry Point
 # ==========================================
