@@ -62,7 +62,7 @@ SEED="${SEED:-0}"
 STEPS_PER_STAGE="${STEPS_PER_STAGE:-1000000}"
 DEVICE="${DEVICE:-cuda:6}"
 CONTROL_FREQ="${CONTROL_FREQ:-40}"
-MAX_ACCEL_RAD_S2="${MAX_ACCEL_RAD_S2:-150}"
+MAX_ACCEL_RAD_S2="${MAX_ACCEL_RAD_S2:-200}"
 DR_LAG_TAU_MIN_S2="${DR_LAG_TAU_MIN_S2:-0.000}"
 DR_LAG_TAU_MAX_S2="${DR_LAG_TAU_MAX_S2:-0.060}"
 DR_LAG_TAU_MIN_S3="${DR_LAG_TAU_MIN_S3:-0.030}"
@@ -70,6 +70,7 @@ DR_LAG_TAU_MAX_S3="${DR_LAG_TAU_MAX_S3:-0.060}"
 REWARD_ACTION_RATE_WEIGHT="${REWARD_ACTION_RATE_WEIGHT:-0.02}"
 REWARD_MOTOR_JERK_WEIGHT="${REWARD_MOTOR_JERK_WEIGHT:-0.01}"
 REWARD_STILLNESS_BONUS_WEIGHT="${REWARD_STILLNESS_BONUS_WEIGHT:-}"
+MAX_VELOCITY_RAD_S="${MAX_VELOCITY_RAD_S:-7}"
 
 # Optional flag block: only pass each --reward-* arg if the user set it.
 EXTRA_REWARD_ARGS=()
@@ -102,6 +103,7 @@ python -u train_PPO_stable_baseline.py \
     --device "$DEVICE" \
     --control-freq "$CONTROL_FREQ" \
     --max-accel-rad-s2 "$MAX_ACCEL_RAD_S2" \
+    --max-velocity-rad-s "$MAX_VELOCITY_RAD_S" \
     "${EXTRA_REWARD_ARGS[@]}" \
     --run-name "$run_stage1" \
     --seed "$SEED" \

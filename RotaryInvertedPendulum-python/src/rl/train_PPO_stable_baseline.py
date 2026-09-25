@@ -110,6 +110,7 @@ def train(args: argparse.Namespace) -> Path:
         (args.dr_action_lag_tau_min, args.dr_action_lag_tau_max)
         if args.dr_action_lag_tau_max is not None else None
     )
+    dr_eval_action_lag = (args.dr_action_lag_tau_min + args.dr_action_lag_tau_max) / 2.0 if args.dr_action_lag_tau_max is not None else 0.0
     train_env = DummyVecEnv([make_env(
         run_dir,
         domain_randomization=args.domain_randomization,
@@ -139,6 +140,7 @@ def train(args: argparse.Namespace) -> Path:
         reward_stillness_bonus_weight=args.reward_stillness_bonus_weight,
         max_velocity_rad_s=args.max_velocity_rad_s,
         dr_theta_bias_max_rad=0.0,  # force bias-free eval reference
+        dr_action_lag_tau_range_s=(dr_eval_action_lag, dr_eval_action_lag),
     )])
 
     if args.resume:

@@ -822,7 +822,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
                 cos_theta,
                 sin_theta,
                 motor_vel_norm,
-                -pen_vel_norm,
+                pen_vel_norm,
                 prev_act_norm,
             ],
             dtype=np.float32,
