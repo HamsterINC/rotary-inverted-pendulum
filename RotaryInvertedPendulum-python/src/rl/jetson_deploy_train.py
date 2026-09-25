@@ -165,6 +165,7 @@ class RealPendulumEnv(gym.Env):
         self.prev_arm_steps = 0
         self.prev_pend_ticks = -read_raw_ticks(spi_pendulum)
         self.prev_action = 0.0
+        self.prev_motor_vel = 0.0
         self.step_count = 0
         self.next_tick = time.perf_counter()
 
@@ -234,6 +235,7 @@ class RealPendulumEnv(gym.Env):
         # 3. Standard Environment Reset Tracker Update
         # ------------------------------------------
         self.prev_action = 0.0
+        self.prev_motor_vel = 0.0
         self.step_count = 0
         with state_lock:
             self.prev_arm_steps = arm_current_steps 
