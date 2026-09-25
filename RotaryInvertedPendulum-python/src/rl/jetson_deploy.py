@@ -17,7 +17,7 @@ from JetsonPWM import JetsonPWM
 
 from stable_baselines3 import PPO
 
-SB3_ZIP_PATH = "./Saved_runs/2209-4.zip"
+SB3_ZIP_PATH = "./Saved_runs/2509-3.zip"
 
 # ==========================================
 # Timing Constants
@@ -38,7 +38,7 @@ ARM_MAX_SAFE_STEPS = int(ARM_SAFE_LIMIT_RAD / ARM_RAD_PER_STEP)
 
 # Kinematic Envelopes (Directly from sim env)
 MAX_ACCEL_RAD_S2 = 150.0
-MAX_VELOCITY_RAD_S = 10.0
+MAX_VELOCITY_RAD_S = 5.0
 ARM_MAX_DELTA_STEPS = (MAX_VELOCITY_RAD_S / ARM_RAD_PER_STEP) * PERIOD
 
 PWM_MIN_FREQ_HZ = 40.0
@@ -221,13 +221,13 @@ def cpu_control_loop(model: nn.Module):
             )
             prev_pend_ticks = pend_ticks
 
-            #print(
-            #    f"Pend Pos: {pend_rad:.4f} rad | "
-            #    f"Pend Vel: {norm_pend_vel:.4f} (norm)"
-            #    f"Arm Pos: {norm_arm_pos:.4f} norm "
-            #    f"Arm Vel: {norm_arm_vel:.4f} norm "
-                #f"F_prev: {action:.4f} "
-            #)
+            print(
+                f"Pend Pos: {pend_rad:.4f} rad | "
+                f"Pend Vel: {norm_pend_vel:.4f} (norm)"
+                f"Arm Pos: {norm_arm_pos:.4f} norm "
+                f"Arm Vel: {norm_arm_vel:.4f} norm "
+                f"F_prev: {action:.4f} "
+            )
 
             # 3. Observation tensor
             features = torch.tensor(
@@ -270,7 +270,7 @@ def cpu_control_loop(model: nn.Module):
                     loop_start - t_start_session,
                     10,
                 ),
-                "arm_pos_rad": round(arm_pos_rad, 10),
+                "arm_pos_rad": round(norm_arm_pos, 10),
                 "arm_actual_vel_rad_s": round(
                     norm_arm_vel,
                     10,
@@ -404,7 +404,7 @@ def step_update_loop():
             # the commanded position has changed.
             # ------------------------------------------------------
             if step_error != 0:
-                is_forward = step_error > 0
+                is_forward = step_error < 0
 
                 GPIO.output(
                     DIR_PIN,

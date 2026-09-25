@@ -13,8 +13,10 @@ import spidev
 from JetsonPWM import JetsonPWM
 from stable_baselines3 import PPO
 
+from dataclasses import dataclass
+
 # ==========================================
-# Constants (Keep your existing constants here)
+# Constants
 # ==========================================
 TARGET_HZ = 40.0
 PERIOD = 1.0 / TARGET_HZ
@@ -39,7 +41,7 @@ PEND_MAX_DELTA_TICKS = (MAX_PENDULUM_VEL_RAD_S / PEND_LSB_RAD) * PERIOD
 DIR_PIN = 16
 EN_PIN = 22
 
-SB3_ZIP_PATH = "./Saved_runs/2209-3.zip"
+SB3_ZIP_PATH = "./Saved_runs/2509-2.zip"
 
 # ==========================================
 # Shared Hardware State (Used by Background Thread)
@@ -79,159 +81,53 @@ def process_encoder(current_ticks: int, prev_ticks: int):
     return angle_rad, norm_vel
 
 # ==========================================
-# 100Hz Background Stepper Thread (Unchanged)
+# 100Hz Background Stepper Thread
 # ==========================================
 def step_update_loop():
-    """
-    100 Hz thread.
-
-    Every 10 ms:
-        acceleration -> velocity -> position -> target steps -> PWM
-
-    The acceleration command is supplied by the 40 Hz NN thread.
-    """
-    global arm_current_steps
-    global motor_vel_rad_s
-    global motor_target_rad
+    global arm_current_steps, motor_vel_rad_s, motor_target_rad
 
     pwm_step = JetsonPWM(chip=0, channel=0)
     pwm_step.start(initial_freq_hz=PWM_MIN_FREQ_HZ)
 
     print("[Step Thread] Starting 100 Hz kinematics/PWM loop.")
-
     next_tick = time.perf_counter()
 
     try:
         while not stop_event.is_set():
-            # ------------------------------------------------------
-            # 1. Read the most recent acceleration from the NN.
-            # ------------------------------------------------------
             with state_lock:
                 accel_cmd = shared_accel_cmd
                 current_steps = arm_current_steps
 
             dt = STEP_UPDATE_PERIOD
 
-            # ------------------------------------------------------
-            # 2. ACCELERATION -> VELOCITY
-            #
-            # This happens every 10 ms, independently of NN timing.
-            # ------------------------------------------------------
             motor_vel_rad_s += accel_cmd * dt
+            motor_vel_rad_s = max(-MAX_VELOCITY_RAD_S, min(MAX_VELOCITY_RAD_S, motor_vel_rad_s))
 
-            motor_vel_rad_s = max(
-                -MAX_VELOCITY_RAD_S,
-                min(
-                    MAX_VELOCITY_RAD_S,
-                    motor_vel_rad_s,
-                ),
-            )
-
-            # ------------------------------------------------------
-            # 3. Boundary handling.
-            #
-            # Stop velocity if we are at a safety limit and still
-            # trying to move farther outward.
-            # ------------------------------------------------------
-            if (
-                motor_target_rad >= ARM_SAFE_LIMIT_RAD
-                and motor_vel_rad_s > 0.0
-            ):
+            if motor_target_rad >= ARM_SAFE_LIMIT_RAD and motor_vel_rad_s > 0.0:
                 motor_vel_rad_s = 0.0
                 motor_target_rad = ARM_SAFE_LIMIT_RAD
-
-            elif (
-                motor_target_rad <= -ARM_SAFE_LIMIT_RAD
-                and motor_vel_rad_s < 0.0
-            ):
+            elif motor_target_rad <= -ARM_SAFE_LIMIT_RAD and motor_vel_rad_s < 0.0:
                 motor_vel_rad_s = 0.0
                 motor_target_rad = -ARM_SAFE_LIMIT_RAD
 
-            # ------------------------------------------------------
-            # 4. VELOCITY -> POSITION
-            #
-            # Also happens every 10 ms.
-            # ------------------------------------------------------
             motor_target_rad += motor_vel_rad_s * dt
+            motor_target_rad = max(-ARM_SAFE_LIMIT_RAD, min(ARM_SAFE_LIMIT_RAD, motor_target_rad))
 
-            motor_target_rad = max(
-                -ARM_SAFE_LIMIT_RAD,
-                min(
-                    ARM_SAFE_LIMIT_RAD,
-                    motor_target_rad,
-                ),
-            )
-
-            # ------------------------------------------------------
-            # 5. POSITION -> TARGET STEPS
-            # ------------------------------------------------------
-            target_pos_steps = int(
-                round(
-                    motor_target_rad / ARM_RAD_PER_STEP
-                )
-            )
-
-            target_pos_steps = max(
-                -ARM_MAX_SAFE_STEPS,
-                min(
-                    ARM_MAX_SAFE_STEPS,
-                    target_pos_steps,
-                ),
-            )
+            target_pos_steps = int(round(motor_target_rad / ARM_RAD_PER_STEP))
+            target_pos_steps = max(-ARM_MAX_SAFE_STEPS, min(ARM_MAX_SAFE_STEPS, target_pos_steps))
 
             step_error = target_pos_steps - current_steps
 
-            # ------------------------------------------------------
-            # 6. TARGET STEPS -> PWM
-            #
-            # PWM is updated on every 100 Hz control iteration when
-            # the commanded position has changed.
-            # ------------------------------------------------------
             if step_error != 0:
-                is_forward = step_error > 0
+                is_forward = step_error < 0
+                GPIO.output(DIR_PIN, GPIO.HIGH if is_forward else GPIO.LOW)
 
-                GPIO.output(
-                    DIR_PIN,
-                    GPIO.HIGH if is_forward else GPIO.LOW,
-                )
-
-                # Maximum number of steps that corresponds to
-                # MAX_VELOCITY_RAD_S during this 10 ms interval.
-                max_steps_this_update = max(
-                    1,
-                    int(
-                        math.floor(
-                            MAX_VELOCITY_RAD_S
-                            * dt
-                            / ARM_RAD_PER_STEP
-                        )
-                    ),
-                )
-
-                actual_steps = max(
-                    -max_steps_this_update,
-                    min(
-                        max_steps_this_update,
-                        step_error,
-                    ),
-                )
+                max_steps_this_update = max(1, int(math.floor(MAX_VELOCITY_RAD_S * dt / ARM_RAD_PER_STEP)))
+                actual_steps = max(-max_steps_this_update, min(max_steps_this_update, step_error))
 
                 new_current_steps = current_steps + actual_steps
+                new_current_steps = max(-ARM_MAX_SAFE_STEPS, min(ARM_MAX_SAFE_STEPS, new_current_steps))
 
-                new_current_steps = max(
-                    -ARM_MAX_SAFE_STEPS,
-                    min(
-                        ARM_MAX_SAFE_STEPS,
-                        new_current_steps,
-                    ),
-                )
-
-                # Convert the commanded step rate into PWM frequency.
-                #
-                # The PWM frequency is NOT 100 Hz.
-                # 100 Hz is the rate at which this calculation is
-                # refreshed. The resulting PWM frequency can be much
-                # higher because it represents step pulses/second.
                 freq = abs(actual_steps) / dt
                 freq = max(PWM_MIN_FREQ_HZ, freq)
 
@@ -239,27 +135,13 @@ def step_update_loop():
 
                 with state_lock:
                     arm_current_steps = new_current_steps
-
             else:
                 pwm_step.pause()
+                if abs(motor_target_rad - current_steps * ARM_RAD_PER_STEP) < ARM_RAD_PER_STEP * 0.5:
+                    motor_target_rad = current_steps * ARM_RAD_PER_STEP
 
-                # If the quantized step target has stopped changing,
-                # do not allow a tiny residual velocity to accumulate
-                # indefinitely against the same step position.
-                if abs(
-                    motor_target_rad
-                    - current_steps * ARM_RAD_PER_STEP
-                ) < ARM_RAD_PER_STEP * 0.5:
-                    motor_target_rad = (
-                        current_steps * ARM_RAD_PER_STEP
-                    )
-            #print(motor_vel_rad_s)
-            # ------------------------------------------------------
-            # 7. 100 Hz timing
-            # ------------------------------------------------------
             next_tick += STEP_UPDATE_PERIOD
             sleep_time = next_tick - time.perf_counter()
-
             if sleep_time > 0:
                 time.sleep(sleep_time)
             else:
@@ -277,38 +159,90 @@ class RealPendulumEnv(gym.Env):
     def __init__(self):
         super().__init__()
         
-        # Action is a single float [-1.0, 1.0] representing normalized acceleration
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
-        
-        # Obs: [arm_pos, cos(pend), sin(pend), arm_vel, pend_vel, prev_action]
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
 
         self.prev_arm_steps = 0
         self.prev_pend_ticks = -read_raw_ticks(spi_pendulum)
         self.prev_action = 0.0
+        self.prev_motor_vel = 0.0
+        self.step_count = 0
         self.next_tick = time.perf_counter()
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        global shared_accel_cmd
+        global shared_accel_cmd, arm_current_steps
 
-        # 1. Stop the motor safely
+        print("\n[ENV] Episode finished. Homing arm smoothly to center...")
+        
+        # ==========================================
+        # 1. Homing Sequence (Runs locally in reset)
+        # ==========================================
+        with state_lock:
+            prev_steps = arm_current_steps
+            
+        last_time = time.perf_counter()
+        
+        while True:
+            # Read current state
+            with state_lock:
+                curr_steps = arm_current_steps
+                
+            # Exit condition: We are at center (within 2 steps) AND not moving
+            if abs(curr_steps) <= 2 and curr_steps == prev_steps:
+                break
+                
+            # Calculate accurate time step for velocity estimation
+            curr_time = time.perf_counter()
+            dt = curr_time - last_time
+            if dt <= 0.001: 
+                dt = 0.025
+                
+            # Calculate position and velocity
+            current_pos_rad = curr_steps * ARM_RAD_PER_STEP
+            current_vel_rad_s = ((curr_steps - prev_steps) * ARM_RAD_PER_STEP) / dt
+            
+            # --- PD Controller for Smooth Acceleration ---
+            # Kp (Proportional) acts like a spring pulling the arm to 0.0.
+            # Kd (Derivative) acts like friction, slowing it down so it doesn't overshoot.
+            Kp = 30.0  
+            Kd = 10.0  
+            
+            accel_cmd = (0.0 - current_pos_rad) * Kp - (current_vel_rad_s * Kd)
+            
+            # Cap the homing acceleration to a very gentle 20 rad/s^2 (max is 150)
+            accel_cmd = max(-20.0, min(20.0, accel_cmd))
+            
+            # Send the gentle acceleration command to the background thread
+            with state_lock:
+                shared_accel_cmd = accel_cmd
+                
+            # Update trackers and sleep to run at roughly 40Hz
+            prev_steps = curr_steps
+            last_time = curr_time
+            time.sleep(0.025)
+
+        # ------------------------------------------
+        # 2. Stop completely & let pendulum settle
+        # ------------------------------------------
         with state_lock:
             shared_accel_cmd = 0.0
+
+        print("[ENV] Arm homed! Waiting 3 seconds for pendulum to stop swinging...")
+        time.sleep(3.0)
+
+        # ------------------------------------------
+        # 3. Standard Environment Reset Tracker Update
+        # ------------------------------------------
         self.prev_action = 0.0
-
-        print("\n[ENV] Episode terminated. Motor stopped.")
-        print("[ENV] Please physically center the arm and stand the pendulum upright.")
-        
-        # 2. Wait for physical reset (e.g., user holds pendulum upright for 2 seconds)
-        # In a real setup, you might loop here reading the encoder until it's upright and still.
-        input("Press ENTER when pendulum is upright to start the next episode...")
-
-        # 3. Reset internal tracking states
-        self.prev_arm_steps = arm_current_steps 
+        self.prev_motor_vel = 0.0
+        self.step_count = 0
+        with state_lock:
+            self.prev_arm_steps = arm_current_steps 
+            
         self.prev_pend_ticks = -read_raw_ticks(spi_pendulum)
         
-        # Get initial observation
+        # Get initial observation for the new episode
         obs = self._get_obs(0.0)
         self.next_tick = time.perf_counter() + CONTROL_PERIOD
         
@@ -316,6 +250,7 @@ class RealPendulumEnv(gym.Env):
 
     def step(self, action):
         global shared_accel_cmd
+        self.step_count += 1
 
         # 1. Enforce 40Hz timing
         sleep_time = self.next_tick - time.perf_counter()
@@ -333,32 +268,45 @@ class RealPendulumEnv(gym.Env):
 
         # 3. Read physical states
         obs = self._get_obs(action_val)
-        arm_pos, cos_p, sin_p, arm_vel, pend_vel, _ = obs
+        arm_pos, cos_p, sin_p, norm_arm_vel, norm_pend_vel, _ = obs
         
-        # Reconstruct actual pendulum angle for reward logic
-        pend_rad = math.atan2(sin_p, cos_p) 
+        pend_rad = math.atan2(sin_p, cos_p)
+        actual_arm_pos = arm_pos * (STEPS_PER_REV / 2) * ARM_RAD_PER_STEP
+        actual_arm_vel = norm_arm_vel * MAX_VELOCITY_RAD_S
+        actual_pend_vel = norm_pend_vel * MAX_PENDULUM_VEL_RAD_S 
 
-        # 4. Calculate Reward (MUST closely match your sim reward)
-        # Example: Reward for being upright, penalize large arm movements & harsh actions
-        reward = math.cos(pend_rad) - 0.05 * abs(arm_pos) - 0.1 * abs(action_val)
+        # 4. Calculate Reward 
+        # Max reward (+1) when upright, min reward (-1) when hanging straight down.
+        reward = compute_reward(
+            theta=pend_rad,
+            pen_vel=actual_pend_vel,
+            motor_pos=actual_arm_pos,
+            motor_vel=actual_arm_vel,
+            action=action_val,
+            prev_action=self.prev_action,
+            prev_motor_vel=self.prev_motor_vel,
+            weights=REWARD_WEIGHTS
+        )
 
         # 5. Determine Termination (Failure conditions)
         terminated = False
+        truncated = False
         
-        # Did the pendulum fall? (e.g., > 45 degrees)
-        if abs(pend_rad) > math.radians(45):
-            terminated = True
-            reward -= 10.0 # Heavy penalty for dropping it
-            
-        # Did the arm hit the physical safety limit?
+        # ONLY terminate if the arm hits the physical safety limit
         with state_lock:
             current_steps = arm_current_steps
         if abs(current_steps) >= ARM_MAX_SAFE_STEPS - 50:
             terminated = True
-            reward -= 10.0
+            reward -= 10.0 # Heavy penalty for hitting the edge
+            
+        # Truncate episode exactly when PPO buffer fills (2048 steps = 51.2 seconds)
+        if self.step_count >= 2048:
+            truncated = True
 
         self.prev_action = action_val
-        return obs, reward, terminated, False, {}
+        
+        # New Gym API expects 5 variables: obs, reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, {}
 
     def _get_obs(self, current_action):
         with state_lock:
@@ -386,6 +334,58 @@ class RealPendulumEnv(gym.Env):
         
         return obs
 
+
+
+@dataclass
+class RewardWeights:
+    k_pen_vel: float = 0.001         # FILL THESE IN WITH YOUR SIM VALUES!
+    k_motor_pos: float = 0.5 
+    k_motor_vel: float = 0.005
+    k_action: float =  0.20
+    k_action_rate: float = 0.02
+    k_motor_jerk: float =  0.01
+    k_stillness_bonus: float = 0.0
+    sigma_theta: float =  0.3 
+    sigma_motor_vel: float =  1.0
+
+# Instantiate your weights
+REWARD_WEIGHTS = RewardWeights()
+
+def compute_reward(
+    *,
+    theta: float,
+    pen_vel: float,
+    motor_pos: float,
+    motor_vel: float,
+    action: float,
+    prev_action: float,
+    prev_motor_vel: float,
+    weights: RewardWeights,
+) -> float:
+    """Exact copy of your sim reward function."""
+    action_delta = action - prev_action
+    motor_vel_delta = motor_vel - prev_motor_vel
+    
+    cost = (
+        theta * theta
+        + weights.k_pen_vel * pen_vel * pen_vel
+        + weights.k_motor_pos * motor_pos * motor_pos
+        + weights.k_motor_vel * motor_vel * motor_vel
+        + weights.k_action * action * action
+        + weights.k_action_rate * action_delta * action_delta
+        + weights.k_motor_jerk * motor_vel_delta * motor_vel_delta
+    )
+    
+    if weights.k_stillness_bonus > 0.0:
+        sigma_theta_sq = weights.sigma_theta * weights.sigma_theta
+        sigma_motor_vel_sq = weights.sigma_motor_vel * weights.sigma_motor_vel
+        upright_score = math.exp(-(theta * theta) / sigma_theta_sq)
+        stillness_score = math.exp(-(motor_vel * motor_vel) / sigma_motor_vel_sq)
+        bonus = weights.k_stillness_bonus * upright_score * stillness_score
+    else:
+        bonus = 0.0
+        
+    return float(bonus - cost)
 # ==========================================
 # Main Training Entry Point
 # ==========================================
@@ -402,20 +402,23 @@ if __name__ == "__main__":
         # 2. Instantiate Environment
         env = RealPendulumEnv()
 
-        # 3. Load existing pre-trained model but attach the REAL environment
+        # 3. Load existing pre-trained model
         print(f"Loading base model from {SB3_ZIP_PATH}...")
         model = PPO.load(SB3_ZIP_PATH, env=env, device="cpu")
         
-        # 4. Optional: Lower learning rate for fine-tuning on real hardware
-        # model.learning_rate = 1e-4
+        # Lower learning rate slightly so it doesn't instantly forget its balancing behavior 
+        # while thrashing around trying to figure out swing-up.
+        model.learning_rate = 1e-4
 
-        # 5. Start real-world training!
+        # 4. Start real-world training!
         print("\nStarting Real-World Training...")
-        # Note: 10,000 steps at 40Hz is ~4 minutes of real-world continuous time
-        model.learn(total_timesteps=10000, reset_num_timesteps=False)
+        
+        # 51,200 timesteps = 25 updates (roughly 21 minutes of real-world time)
+        # You can safely increase this to 102400 (50 cycles) if you have time.
+        model.learn(total_timesteps=51200, reset_num_timesteps=False)
 
-        # 6. Save the newly fine-tuned model
-        save_path = "./Saved_runs/real_world_finetuned.zip"
+        # 5. Save the newly fine-tuned model
+        save_path = "./Saved_runs/real_world_swingup.zip"
         model.save(save_path)
         print(f"Real-world training complete. Saved to {save_path}")
 

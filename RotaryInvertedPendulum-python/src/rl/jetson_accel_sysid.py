@@ -45,7 +45,7 @@ EN_PIN = 22
 STEP_UPDATE_PERIOD = 0.01        # 100 Hz stepper integration (10 ms)
 PWM_MIN_FREQ_HZ = 60.0           # Lowest nonzero PWM frequency
 ARM_SAFE_LIMIT_RAD = 1.25        # Arm travel limit (~71 deg)
-ARM_RAD_PER_STEP = 0.00049087385  # 2*pi / (200 steps * 16 microsteps) ~ 3200 steps/rev
+ARM_RAD_PER_STEP = 0.0019634954  # 2*pi / (200 steps * 16 microsteps) ~ 3200 steps/rev
 ARM_MAX_SAFE_STEPS = int(ARM_SAFE_LIMIT_RAD / ARM_RAD_PER_STEP)
 
 STEP_DURATION_S = 3.5
@@ -259,22 +259,22 @@ def step_update_loop() -> None:
 def waveform_step(t: float) -> float:
     """Bipolar acceleration pulses designed to bound arm position."""
     if t < 0.3: return 0.0
-    if t < 0.4: return +20.0
-    if t < 0.5: return -20.0
+    if t < 0.4: return +40.0
+    if t < 0.5: return -40.0
     if t < 1.0: return 0.0
-    if t < 1.05: return +30.0
-    if t < 1.10: return -30.0
+    if t < 1.05: return +60.0
+    if t < 1.10: return -60.0
     if t < 1.6:  return 0.0
-    if t < 1.633: return +50.0
-    if t < 1.667: return -50.0
+    if t < 1.633: return +100.0
+    if t < 1.667: return -100.0
     if t < 2.2:   return 0.0
-    if t < 2.25:  return -30.0
-    if t < 2.30:  return +30.0
+    if t < 2.25:  return -60.0
+    if t < 2.30:  return +60.0
     if t < 2.8:   return 0.0
     # Dynamic zero-crossing reversal
-    if t < 2.85:  return +20.0
-    if t < 2.95:  return -20.0
-    if t < 3.00:  return +20.0
+    if t < 2.85:  return +60.0
+    if t < 2.95:  return -60.0
+    if t < 3.00:  return +60.0
     return 0.0
 
 
@@ -285,7 +285,7 @@ def waveform_chirp(t: float) -> float:
     if s > 8.0: return 0.0
     f0, f1 = 0.5, 3.0
     freq = f0 + (f1 - f0) * s / 8.0
-    return 50.0 * math.sin(2.0 * math.pi * freq * s)
+    return 100.0 * math.sin(2.0 * math.pi * freq * s)
 
 
 # ---------------------------------------------------------------------------
