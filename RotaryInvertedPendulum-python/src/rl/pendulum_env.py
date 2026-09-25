@@ -692,11 +692,29 @@ class RotaryInvertedPendulumEnv(gym.Env):
             n_sub = self._n_substeps
         actual_dt_s = n_sub * self.model.opt.timestep
 
+
+
+        # --- Dynamic Torque Curve (Back-EMF Model) ---
+        # Calculate how fast the motor is currently moving
+        current_speed = abs(self._motor_vel)
+
+        # Create a multiplier that drops as speed increases.
+        # E.g., if torque drops by 80% at max_velocity:
+        # At 0 rad/s -> multiplier is 1.0 (100% torque)
+        # At max_velocity -> multiplier is 0.2 (20% torque)
+        torque_falloff_factor = 0.85  # Tune this based on your physical Slip Test results
+        torque_multiplier = 1.0 - torque_falloff_factor * (current_speed / self.max_velocity_rad_s)
+
+        # Ensure it never drops strictly to 0 to prevent divide/clip errors
+        torque_multiplier = max(0.1, torque_multiplier)
+
+        # Calculate the actual available acceleration at this exact millisecond
+        dynamic_max_accel = self._motor_max_accel_rad_s2 * torque_multiplier
         # --- Accel-mode integration: action → accel → velocity (capped) → pos target. ---
         # Mirrors FastAccelStepper's moveByAcceleration() behaviour. The
         # per-episode envelope clamp models the stepper's torque-limited
         # accel ceiling under varying load.
-        accel_cmd = delayed_action * self.max_accel_rad_s2
+        accel_cmd = delayed_action * dynamic_max_accel
         accel_cmd = float(np.clip(accel_cmd,
                                    -self._motor_max_accel_rad_s2,
                                    self._motor_max_accel_rad_s2))
