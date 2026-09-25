@@ -30,8 +30,8 @@ class RewardWeights:
     k_action: float = 0.20       # action magnitude penalty
 
     # Extras (default 0 = disabled, preserves canonical 5-term reward).
-    k_action_rate: float = 0.0   # penalty on (a_t - a_{t-1})² ("command jerk")
-    k_motor_jerk: float = 0.0    # penalty on (motor_vel_t - motor_vel_{t-1})²
+    k_action_rate: float = 0.02   # penalty on (a_t - a_{t-1})² ("command jerk")
+    k_motor_jerk: float = 0.01    # penalty on (motor_vel_t - motor_vel_{t-1})²
 
     # Multiplicative stillness bonus: ADDS k · exp(-θ²/σ_θ²) · exp(-α̇²/σ_v²).
     # Targets Kapitza-style resonance balance: the product is only large

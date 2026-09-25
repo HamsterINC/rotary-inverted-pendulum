@@ -222,7 +222,7 @@ def evaluate(args: argparse.Namespace) -> None:
         reward_motor_jerk_weight=args.reward_motor_jerk_weight,
         reward_stillness_bonus_weight=args.reward_stillness_bonus_weight,
         dr_theta_bias_max_rad=0.0,
-        action_lag_tau_s = (args.dr_action_lag_tau_min + args.dr_action_lag_tau_max) / 2.0 if args.dr_action_lag_tau_max is not None else None,
+        action_lag_tau_s = (args.dr_action_lag_tau_min + args.dr_action_lag_tau_max) / 2.0 if args.dr_action_lag_tau_max is not None else 0.0,
     )
     if args.reward_motor_vel_weight is not None:
         env_kwargs["reward_motor_vel_weight"] = args.reward_motor_vel_weight

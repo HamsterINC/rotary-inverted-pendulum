@@ -168,6 +168,8 @@ class RealPendulumEnv(gym.Env):
         self.prev_motor_vel = 0.0
         self.step_count = 0
         self.next_tick = time.perf_counter()
+        self.filtered_arm_vel = 0.0
+        self.filtered_pend_vel = 0.0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -272,16 +274,22 @@ class RealPendulumEnv(gym.Env):
         
         pend_rad = math.atan2(sin_p, cos_p)
         actual_arm_pos = arm_pos * (STEPS_PER_REV / 2) * ARM_RAD_PER_STEP
-        actual_arm_vel = norm_arm_vel * MAX_VELOCITY_RAD_S
-        actual_pend_vel = norm_pend_vel * MAX_PENDULUM_VEL_RAD_S 
+        raw_arm_vel = norm_arm_vel * MAX_VELOCITY_RAD_S
+        raw_pend_vel = norm_pend_vel * MAX_PENDULUM_VEL_RAD_S 
+
+        # --- LOW PASS FILTER (Smoothes the sensor noise) ---
+        # 0.2 means trust the new reading 20%, trust the old smoothed value 80%
+        alpha = 0.2 
+        self.filtered_arm_vel = (alpha * raw_arm_vel) + ((1.0 - alpha) * self.filtered_arm_vel)
+        self.filtered_pend_vel = (alpha * raw_pend_vel) + ((1.0 - alpha) * self.filtered_pend_vel)
 
         # 4. Calculate Reward 
         # Max reward (+1) when upright, min reward (-1) when hanging straight down.
         reward = compute_reward(
             theta=pend_rad,
-            pen_vel=actual_pend_vel,
+            pen_vel=self.filtered_pend_vel,
             motor_pos=actual_arm_pos,
-            motor_vel=actual_arm_vel,
+            motor_vel=self.filtered_arm_vel,
             action=action_val,
             prev_action=self.prev_action,
             prev_motor_vel=self.prev_motor_vel,
@@ -304,7 +312,7 @@ class RealPendulumEnv(gym.Env):
             truncated = True
 
         self.prev_action = action_val
-        
+        self.prev_motor_vel = self.filtered_arm_vel
         # New Gym API expects 5 variables: obs, reward, terminated, truncated, info
         return obs, reward, terminated, truncated, {}
 
@@ -408,7 +416,7 @@ if __name__ == "__main__":
         
         # Lower learning rate slightly so it doesn't instantly forget its balancing behavior 
         # while thrashing around trying to figure out swing-up.
-        model.learning_rate = 1e-4
+        model.learning_rate = 3e-5
 
         # 4. Start real-world training!
         print("\nStarting Real-World Training...")
