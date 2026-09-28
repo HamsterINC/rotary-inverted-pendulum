@@ -59,18 +59,18 @@ set -euo pipefail
 
 PREFIX="${1:-curriculum}"
 SEED="${SEED:-0}"
-STEPS_PER_STAGE="${STEPS_PER_STAGE:-1000000}"
+STEPS_PER_STAGE="${STEPS_PER_STAGE:-100000}"
 DEVICE="${DEVICE:-cuda:4}"
 CONTROL_FREQ="${CONTROL_FREQ:-40}"
 MAX_ACCEL_RAD_S2="${MAX_ACCEL_RAD_S2:-150}"
 DR_LAG_TAU_MIN_S2="${DR_LAG_TAU_MIN_S2:-0.000}"
-DR_LAG_TAU_MAX_S2="${DR_LAG_TAU_MAX_S2:-0.060}"
-DR_LAG_TAU_MIN_S3="${DR_LAG_TAU_MIN_S3:-0.030}"
-DR_LAG_TAU_MAX_S3="${DR_LAG_TAU_MAX_S3:-0.060}"
+DR_LAG_TAU_MAX_S2="${DR_LAG_TAU_MAX_S2:-0.030}"
+DR_LAG_TAU_MIN_S3="${DR_LAG_TAU_MIN_S3:-0.010}"
+DR_LAG_TAU_MAX_S3="${DR_LAG_TAU_MAX_S3:-0.030}"
 REWARD_ACTION_RATE_WEIGHT="${REWARD_ACTION_RATE_WEIGHT:-0.01}"
 REWARD_MOTOR_JERK_WEIGHT="${REWARD_MOTOR_JERK_WEIGHT:-0.005}"
 REWARD_STILLNESS_BONUS_WEIGHT="${REWARD_STILLNESS_BONUS_WEIGHT:-}"
-MAX_VELOCITY_RAD_S="${MAX_VELOCITY_RAD_S:-6}"
+MAX_VELOCITY_RAD_S="${MAX_VELOCITY_RAD_S:-5}"
 
 # Optional flag block: only pass each --reward-* arg if the user set it.
 EXTRA_REWARD_ARGS=()
@@ -98,7 +98,7 @@ fi
 echo
 
 echo "=== Stage 1 (no DR) ==="
-python -u train_PPO_stable_baseline.py \
+python -u train_sac.py \
     --total-steps "$STEPS_PER_STAGE" \
     --device "$DEVICE" \
     --control-freq "$CONTROL_FREQ" \
@@ -110,7 +110,7 @@ python -u train_PPO_stable_baseline.py \
     --progress-bar
 
 echo "=== Stage 2 (action-lag tau [${DR_LAG_TAU_MIN_S2}, ${DR_LAG_TAU_MAX_S2}] s) ==="
-python -u train_PPO_stable_baseline.py \
+python -u train_sac.py \
     --total-steps "$STEPS_PER_STAGE" \
     --device "$DEVICE" \
     --control-freq "$CONTROL_FREQ" \
@@ -124,7 +124,7 @@ python -u train_PPO_stable_baseline.py \
     --seed "$SEED"
 
 echo "=== Stage 3 (action-lag tau [${DR_LAG_TAU_MIN_S3}, ${DR_LAG_TAU_MAX_S3}] s) ==="
-python -u train_PPO_stable_baseline.py \
+python -u train_sac.py \
     --total-steps "$STEPS_PER_STAGE" \
     --device "$DEVICE" \
     --control-freq "$CONTROL_FREQ" \

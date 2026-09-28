@@ -832,7 +832,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         cos_theta = math.cos(theta)
         sin_theta = math.sin(theta)
 
-        alpha = 0.2 
+        alpha = 1
         self.filtered_arm_vel = (alpha * motor_vel) + ((1.0 - alpha) * self.filtered_arm_vel)
         self.filtered_pend_vel = (alpha * pen_vel) + ((1.0 - alpha) * self.filtered_pen_vel)
 
