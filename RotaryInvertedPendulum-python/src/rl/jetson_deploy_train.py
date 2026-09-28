@@ -251,7 +251,8 @@ class RealPendulumEnv(gym.Env):
         self.prev_pend_ticks = -read_raw_ticks(spi_pendulum)
         
         # Get initial observation for the new episode
-        obs = self._get_obs(0.0)
+        obs = self._get_obs(0.0, PERIOD)
+        self.last_obs_time = time.perf_counter()
         self.next_tick = time.perf_counter() + CONTROL_PERIOD
         
         return obs, {}
@@ -264,7 +265,7 @@ class RealPendulumEnv(gym.Env):
         sleep_time = self.next_tick - time.perf_counter()
         if sleep_time > 0:
             time.sleep(sleep_time)
-        self.next_tick = CONTROL_PERIOD
+        self.next_tick += CONTROL_PERIOD
 
         # 2. Apply Action to physical hardware
         action_val = float(action[0])
