@@ -28,8 +28,8 @@ STEPS_PER_REV = 3200
 ARM_RAD_PER_STEP = (2.0 * math.pi) / STEPS_PER_REV
 ARM_SAFE_LIMIT_RAD = math.radians(125.0)
 ARM_MAX_SAFE_STEPS = int(ARM_SAFE_LIMIT_RAD / ARM_RAD_PER_STEP)
-MAX_ACCEL_RAD_S2 = 150.0
-MAX_VELOCITY_RAD_S = 5.0
+MAX_ACCEL_RAD_S2 = 200.0
+MAX_VELOCITY_RAD_S = 7.0
 ARM_MAX_DELTA_STEPS = (MAX_VELOCITY_RAD_S / ARM_RAD_PER_STEP) * PERIOD
 PWM_MIN_FREQ_HZ = 40.0
 
@@ -37,11 +37,12 @@ PEND_ENCODER_RESOLUTION = 16384
 PEND_LSB_RAD = (2.0 * math.pi) / PEND_ENCODER_RESOLUTION
 MAX_PENDULUM_VEL_RAD_S = 30.0
 PEND_MAX_DELTA_TICKS = (MAX_PENDULUM_VEL_RAD_S / PEND_LSB_RAD) * PERIOD
+MAX_TICKS_PER_SEC = MAX_PENDULUM_VEL_RAD_S / PEND_LSB_RAD
 
 DIR_PIN = 16
 EN_PIN = 22
 
-SB3_ZIP_PATH = "./Saved_runs/2509-2.zip"
+SB3_ZIP_PATH = "./Saved_runs/2509_vel.zip"
 
 # ==========================================
 # Shared Hardware State (Used by Background Thread)
@@ -67,16 +68,20 @@ def read_raw_ticks(spi_device) -> int:
     raw = (data[0] << 8) | data[1]
     return raw & 0x3FFF
 
-def process_encoder(current_ticks: int, prev_ticks: int):
+def process_encoder(current_ticks: int, prev_ticks: int, actual_dt: float):
+
     norm_angle = (current_ticks - 5000) / 8192
+
     norm_angle = (norm_angle + 1.0) % 2.0 - 1.0
     angle_rad = norm_angle * math.pi
 
     delta = current_ticks - prev_ticks
     if delta > 8192: delta -= 16384
     elif delta < -8192: delta += 16384
+
+    ticks_per_sec = delta / actual_dt
     
-    norm_vel = delta / float(PEND_MAX_DELTA_TICKS)
+    norm_vel = ticks_per_sec / MAX_TICKS_PER_SEC
     norm_vel = max(-1.0, min(1.0, norm_vel))
     return angle_rad, norm_vel
 
@@ -170,6 +175,7 @@ class RealPendulumEnv(gym.Env):
         self.next_tick = time.perf_counter()
         self.filtered_arm_vel = 0.0
         self.filtered_pend_vel = 0.0
+        self.last_obs_time = 0.0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -258,7 +264,7 @@ class RealPendulumEnv(gym.Env):
         sleep_time = self.next_tick - time.perf_counter()
         if sleep_time > 0:
             time.sleep(sleep_time)
-        self.next_tick = time.perf_counter() + CONTROL_PERIOD
+        self.next_tick = CONTROL_PERIOD
 
         # 2. Apply Action to physical hardware
         action_val = float(action[0])
@@ -268,8 +274,15 @@ class RealPendulumEnv(gym.Env):
         with state_lock:
             shared_accel_cmd = accel_cmd
 
+
+        # FIX: Calculate actual_dt specifically for the encoder velocity math
+        current_time = time.perf_counter()
+        
+        # (Make sure to initialize self.last_obs_time in your environment's __init__)
+        actual_dt = current_time - self.last_obs_time 
+        self.last_obs_time = current_time
         # 3. Read physical states
-        obs = self._get_obs(action_val)
+        obs = self._get_obs(action_val, actual_dt)
         arm_pos, cos_p, sin_p, norm_arm_vel, norm_pend_vel, _ = obs
         
         pend_rad = math.atan2(sin_p, cos_p)
@@ -316,7 +329,7 @@ class RealPendulumEnv(gym.Env):
         # New Gym API expects 5 variables: obs, reward, terminated, truncated, info
         return obs, reward, terminated, truncated, {}
 
-    def _get_obs(self, current_action):
+    def _get_obs(self, current_action, actual_dt):
         with state_lock:
             observed_arm_steps = arm_current_steps
 
@@ -328,7 +341,7 @@ class RealPendulumEnv(gym.Env):
 
         # Pendulum calculations
         pend_ticks = -read_raw_ticks(spi_pendulum)
-        pend_rad, norm_pend_vel = process_encoder(pend_ticks, self.prev_pend_ticks)
+        pend_rad, norm_pend_vel = process_encoder(pend_ticks, self.prev_pend_ticks, actual_dt)
         self.prev_pend_ticks = pend_ticks
 
         obs = np.array([
