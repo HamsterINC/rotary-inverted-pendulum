@@ -106,7 +106,7 @@ class LowLevelClient:
 
     # --- Handshake -------------------------------------------------------
 
-    def wait_until_ready(self, *, retries: int = 5, retry_delay_s: float = 0.5) -> bool:
+    def wait_until_ready(self, *, retries: int = 10, retry_delay_s: float = 0.3) -> bool:
         """Send READY until the board echoes it back. Returns True on success."""
         for _ in range(retries):
             with self._lock:

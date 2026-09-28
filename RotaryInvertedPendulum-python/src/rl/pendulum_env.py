@@ -694,22 +694,22 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
 
 
-        # --- Dynamic Torque Curve (Back-EMF Model) ---
-        # Calculate how fast the motor is currently moving
-        current_speed = abs(self._motor_vel)
+        # # --- Dynamic Torque Curve (Back-EMF Model) ---
+        # # Calculate how fast the motor is currently moving
+        # current_speed = abs(self._motor_vel)
 
-        # Create a multiplier that drops as speed increases.
-        # E.g., if torque drops by 80% at max_velocity:
-        # At 0 rad/s -> multiplier is 1.0 (100% torque)
-        # At max_velocity -> multiplier is 0.2 (20% torque)
-        torque_falloff_factor = 0.85  # Tune this based on your physical Slip Test results
-        torque_multiplier = 1.0 - torque_falloff_factor * (current_speed / self.max_velocity_rad_s)
+        # # Create a multiplier that drops as speed increases.
+        # # E.g., if torque drops by 80% at max_velocity:
+        # # At 0 rad/s -> multiplier is 1.0 (100% torque)
+        # # At max_velocity -> multiplier is 0.2 (20% torque)
+        # torque_falloff_factor = 0.95  # Tune this based on your physical Slip Test results
+        # torque_multiplier = 1.0 - torque_falloff_factor * (current_speed / self.max_velocity_rad_s)
 
-        # Ensure it never drops strictly to 0 to prevent divide/clip errors
-        torque_multiplier = max(0.1, torque_multiplier)
+        # # Ensure it never drops strictly to 0 to prevent divide/clip errors
+        # torque_multiplier = max(0.1, torque_multiplier)
 
         # Calculate the actual available acceleration at this exact millisecond
-        dynamic_max_accel = self._motor_max_accel_rad_s2 * torque_multiplier
+        dynamic_max_accel = self._motor_max_accel_rad_s2 #* torque_multiplier
         # --- Accel-mode integration: action → accel → velocity (capped) → pos target. ---
         # Mirrors FastAccelStepper's moveByAcceleration() behaviour. The
         # per-episode envelope clamp models the stepper's torque-limited

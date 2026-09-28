@@ -1,5 +1,6 @@
 #include <FastAccelStepper.h>
-#include <AS5600.h>
+#include <SPI.h>
+#include <AS5047P.h>
 #include <Wire.h>
 
 #include "StepperUtils.h"
@@ -24,7 +25,7 @@ const long BAUD_RATE = 2000000;
 // Accel-mode envelope. See pendulum_env.py for the corresponding sim
 // constants. The velocity cap below corresponds to MAX_VELOCITY_RAD_S
 // = 5 rad/s: 5 × (1600 steps/rev / 2π) ≈ 1273 steps/s ⇒ ~785 µs/step.
-const uint32_t MOTOR_MIN_STEP_US = 785;  // ≈ 5 rad/s
+const uint32_t MOTOR_MIN_STEP_US = 392; //785;  // ≈ 5 rad/s
 
 // Position safety limit (matches MOTOR_SAFE_LIMIT_RAD on the Python side,
 // ±125°). Past the rail the firmware actively brakes (commands a fixed
@@ -33,12 +34,12 @@ const uint32_t MOTOR_MIN_STEP_US = 785;  // ≈ 5 rad/s
 // would just let moveByAcceleration(0, true) coast the motor past the
 // rail at peak velocity.
 const int32_t MOTOR_SAFE_LIMIT_STEPS = (int32_t)((125.0f * PI / 180.0f) *
-                                                  (1600.0f / (2.0f * PI)));
+                                                  (3200.0f / (2.0f * PI)));
 // Brake authority when past the rail. 150 rad/s² matches the
 // pendulum_env.py MAX_ACCEL_RAD_S2 — strong enough to bleed off the
 // 5 rad/s vel cap within ~33 ms.
 const int32_t MOTOR_BRAKE_ACCEL_STEPS_S2 =
-    (int32_t)(150.0f * (1600.0f / (2.0f * PI)));
+    (int32_t)(150.0f * (3200.0f / (2.0f * PI)));
 
 // Encoder samples are kept in a ring buffer updated at 500 Hz; GET_STATE
 // returns velocity computed as (newest - oldest)/Δt over a window of 5
@@ -72,7 +73,7 @@ static float   pen_position_rad = 0.0f;
 // State variables
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 FastAccelStepper *stepper = NULL;
-AS5600 as5600;
+AS5047P AS5047P(10);
 
 // `motor_engaged` is only touched from loop() / handleCommand() — no ISR
 // access — so `volatile` would only mislead future readers. Plain bool.
@@ -84,12 +85,23 @@ void sendState();
 void sampleState();
 void computeVelocities(float* motor_vel_rad_s, float* pen_vel_rad_s);
 
+long ZERO_OFFSET_RAW =0;
+
 void setup()
 {
     Serial.begin(BAUD_RATE);
-    Wire.begin();
-    Wire.setClock(400000);   // I²C fast mode for short transaction times.
-    as5600.begin();
+    if (!AS5047P.initSPI()) {
+      Serial.println("AS5047P init failed!");
+      while (1);
+    } 
+
+    delay(100); // Give the sensor a moment to stabilize
+
+    // 1. Read the current position at startup and set it as the zero point
+    long ZERO_OFFSET_RAW = AS5047P.readAngleRaw();
+  
+    Serial.print("Physical zero offset captured at: ");
+    Serial.println(ZERO_OFFSET_RAW); 
 
     engine.init();
     stepper = engine.stepperConnectToPin(STEP_PIN);
@@ -119,7 +131,17 @@ void setup()
     stepper->disableOutputs();
 
     while (!Serial) { ; }
-    while (!as5600.detectMagnet()) { delay(500); }
+    // while (!as5600.detectMagnet()) { delay(500); }
+    // Equivalent to !detectMagnet()
+    // Reads the diagnostic register to check the "Magnet Low" (MAGL) error flag
+    AS5047P_Types::DIAAGC_t diagnostics = AS5047P.read_DIAAGC(nullptr, true);
+    
+    while (diagnostics.data.values.MAGL == 1) {
+      Serial.println("Magnet not detected or too far away! Please adjust.");
+      delay(500);
+      // Read the register again to update the status for the next loop iteration
+      diagnostics = AS5047P.read_DIAAGC(nullptr, true); 
+  }
 
     last_sample_us = micros();
 }
@@ -145,31 +167,44 @@ void loop()
 void sampleState()
 {
     int32_t motor_step = stepper->getCurrentPosition();
-    long raw = as5600.rawAngle();
-
-    // Pendulum wraparound tracking (AS5600 is 12-bit; wrap threshold ±2048).
+    long raw = AS5047P.readAngleRaw(); 
+    
     if (pen_raw_prev < 0)
     {
+        // --- FIRST RUN INITIALIZATION ---
         pen_raw_prev = raw;
+        
+        // Apply the zero offset ONLY to the initial startup position
+        long initial_raw = raw; //- ZERO_OFFSET_RAW;
+        
+        // Wrap the starting math cleanly between 0 and 16383
+        if (initial_raw < 0) initial_raw += 16384;
+        
+        // Set the starting absolute radian position
+        pen_position_rad = (float)initial_raw * (TWO_PI / 16384.0f);
+        
+        // Optional: If you want the pendulum to start between -PI and PI 
+        // instead of 0 to 2PI, uncomment the next line:
+        // if (pen_position_rad > PI) pen_position_rad -= TWO_PI;
     }
     else
     {
+        // --- CONTINUOUS DELTA TRACKING ---
         long delta = raw - pen_raw_prev;
-        if (delta >  2048) delta -= 4096;
-        if (delta < -2048) delta += 4096;
-        // Reject implausibly-large single-step deltas. One bad I²C read
-        // sample that we incorrectly classify as a wrap would add ±2π to
-        // pen_position_rad and contaminate every subsequent observation
-        // (the accumulator never resets). Skip the update on glitches —
-        // velocity for this tick will be slightly stale but stays sane.
+        
+        // AS5047P 14-bit wraparound handling (16384 steps)
+        if (delta >  8192) delta -= 16384;
+        if (delta < -8192) delta += 16384;
+        
+        // Glitch rejection (SPI is much more robust than I2C, but still good to have)
         if (delta > PEN_RAW_MAX_DELTA_LSB || delta < -PEN_RAW_MAX_DELTA_LSB)
         {
-            // Don't update pen_raw_prev either: next good read will
-            // compute the delta against the last trustworthy reading.
+            // Glitch detected: Do nothing. Skip updating pen_raw_prev and position.
         }
         else
         {
-            pen_position_rad += (float)delta * ((2.0f * PI) / 4096.0f);
+            // Convert the clean 14-bit step delta directly to radians
+            pen_position_rad += (float)delta * (TWO_PI / 16384.0f);
             pen_raw_prev = raw;
         }
     }
@@ -209,7 +244,7 @@ void computeVelocities(float* motor_vel_rad_s, float* pen_vel_rad_s)
     }
 
     int32_t motor_step_delta = motor_step_buf[newest] - motor_step_buf[oldest];
-    *motor_vel_rad_s = ((float)motor_step_delta * ((2.0f * PI) / 1600.0f)) / dt_s;
+    *motor_vel_rad_s = ((float)motor_step_delta * ((2.0f * PI) / 3200.0f)) / dt_s;
 
     float pen_delta = pen_rad_buf[newest] - pen_rad_buf[oldest];
     *pen_vel_rad_s = pen_delta / dt_s;
@@ -246,10 +281,10 @@ void handleCommand()
 
             if (!motor_engaged) break;
 
-            // Convert rad/s² to steps/s² (1600 microsteps per revolution).
+            // Convert rad/s² to steps/s² (3200 microsteps per revolution).
             // moveByAcceleration takes int32_t.
             int32_t accel_steps_s2 =
-                (int32_t)(accel_rad_s2 * (1600.0f / (2.0f * PI)));
+                (int32_t)(accel_rad_s2 * (3200.0f / (2.0f * PI)));
 
             // Position-limit safety: past the rail, ignore the host's
             // command and actively brake instead. Just zeroing accel here

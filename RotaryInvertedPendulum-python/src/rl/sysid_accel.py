@@ -63,11 +63,11 @@ def waveform_step(t: float) -> float:
     if t < 0.3: return 0.0
     # Pulse 1: amplitude 50, T=0.1s (50*0.1 = 5 rad/s reached at cap)
     if t < 0.4: return +50.0
-    if t < 0.5: return -50.0
+    if t < 0.55: return -50.0
     if t < 1.0: return 0.0
     # Pulse 2: amplitude 100, T=0.05s
-    if t < 1.05: return +100.0
-    if t < 1.10: return -100.0
+    if t < 1.10: return +100.0
+    if t < 1.15: return -100.0
     if t < 1.6:  return 0.0
     # Pulse 3: amplitude 150, T=0.033s
     if t < 1.633: return +150.0
@@ -130,6 +130,7 @@ def run_real(port: str, baud: int, waveform_fn, duration: float,
             time.sleep(2.0)
         client.set_acceleration(0.0)
         client.engage_motor()
+        client.tare_pendulum()
         time.sleep(0.5)
 
         s0 = client.get_state()
@@ -186,7 +187,7 @@ def run_sim(waveform_fn, duration: float, sample_rate: float,
     )
     env.reset(seed=0)
     env.data.qpos[env._motor_qpos_addr] = float(initial_motor)
-    env.data.qpos[env._pen_qpos_addr] = float(initial_pen)
+    env.data.qpos[env._pen_qpos_addr] = float(initial_pen) 
     env.data.qvel[:] = 0.0
     env._motor_target = float(initial_motor)
     env._motor_vel = 0.0

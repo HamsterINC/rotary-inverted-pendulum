@@ -293,7 +293,7 @@ class RealPendulumEnv(gym.Env):
 
         # --- LOW PASS FILTER (Smoothes the sensor noise) ---
         # 0.2 means trust the new reading 20%, trust the old smoothed value 80%
-        alpha = 0.2 
+        alpha = 0.8 
         self.filtered_arm_vel = (alpha * raw_arm_vel) + ((1.0 - alpha) * self.filtered_arm_vel)
         self.filtered_pend_vel = (alpha * raw_pend_vel) + ((1.0 - alpha) * self.filtered_pend_vel)
 
@@ -331,19 +331,19 @@ class RealPendulumEnv(gym.Env):
         return obs, reward, terminated, truncated, {}
 
     def _get_obs(self, current_action, actual_dt):
+        # Pendulum calculations
+        pend_ticks = -read_raw_ticks(spi_pendulum)
+        pend_rad, norm_pend_vel = process_encoder(pend_ticks, self.prev_pend_ticks, actual_dt)
+        self.prev_pend_ticks = pend_ticks
+
+         # Arm calculations
         with state_lock:
             observed_arm_steps = arm_current_steps
-
-        # Arm calculations
         arm_delta_steps = observed_arm_steps - self.prev_arm_steps
         self.prev_arm_steps = observed_arm_steps
         norm_arm_pos = max(-1.0, min(1.0, observed_arm_steps / float(STEPS_PER_REV / 2)))
         norm_arm_vel = max(-1.0, min(1.0, arm_delta_steps / float(ARM_MAX_DELTA_STEPS)))
 
-        # Pendulum calculations
-        pend_ticks = -read_raw_ticks(spi_pendulum)
-        pend_rad, norm_pend_vel = process_encoder(pend_ticks, self.prev_pend_ticks, actual_dt)
-        self.prev_pend_ticks = pend_ticks
 
         obs = np.array([
             norm_arm_pos,

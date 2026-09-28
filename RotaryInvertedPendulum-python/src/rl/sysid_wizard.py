@@ -117,16 +117,26 @@ def _countdown(seconds: int = 3) -> None:
 # ---------------------------------------------------------------------------
 # Port discovery (lifted from the old sysid_client; same heuristic)
 # ---------------------------------------------------------------------------
+import serial.tools.list_ports
+# def auto_detect_port() -> list[str]:
+#     """Return candidate USB-serial ports that look Arduino-ish."""
+#     import serial.tools.list_ports
+#     needles = ("usbserial", "usbmodem", "wchusbserial", "ttyUSB", "ttyACM")
+#     return [
+#         p.device for p in serial.tools.list_ports.comports()
+#         if any(n in p.device for n in needles)
+#     ]
 
-def auto_detect_port() -> list[str]:
-    """Return candidate USB-serial ports that look Arduino-ish."""
-    import serial.tools.list_ports
-    needles = ("usbserial", "usbmodem", "wchusbserial", "ttyUSB", "ttyACM")
-    return [
-        p.device for p in serial.tools.list_ports.comports()
-        if any(n in p.device for n in needles)
+def auto_detect_port():
+    ports = serial.tools.list_ports.comports()
+    candidates = [
+        p.device
+        for p in ports
+        if "USB" in p.description or "FTDI" in p.description or "Serial" in p.description
     ]
-
+    if candidates:
+        return candidates[-1]
+    return None
 
 def pick_port(arg_port: str | None) -> str:
     if arg_port:

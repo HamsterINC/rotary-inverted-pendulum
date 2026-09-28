@@ -4,7 +4,7 @@
 #include <Arduino.h>   // PI, round()
 #include <stdint.h>
 
-const int32_t microstepsPerRev = 1600; // 200 steps * 8 microsteps
+const int32_t microstepsPerRev = 3200; // 200 steps * 8 microsteps
 
 // `int` is 16-bit on AVR — anything beyond ±32767 steps (~20 revolutions)
 // would silently wrap. Use int32_t end-to-end so the conversion helpers
