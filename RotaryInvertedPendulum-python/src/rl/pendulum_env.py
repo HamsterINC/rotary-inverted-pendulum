@@ -53,7 +53,7 @@ DEFAULT_PARAMS_PATH = HERE / "sysid_params.json"
 # Hard-stop on the motor joint. Matches the lid-boss mechanical limit of ±135°,
 # but we clamp the policy at ±125° so the policy never *commands* a stop hit.
 MOTOR_LIMIT_RAD = math.radians(145.0)
-MOTOR_SAFE_LIMIT_RAD = math.radians(145.0)
+MOTOR_SAFE_LIMIT_RAD = math.radians(125.0)
 
 # Arm geometry, measured 2026-05-02 against the OnShape CAD + a kitchen
 # scale. The arm is 65 mm from the stepper shaft to the pendulum joint
@@ -519,7 +519,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         # Observation is now 5-dim: [motor_pos, theta_norm, motor_vel, pen_vel, prev_action]
         obs_high = np.array(
-            [1, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+            [MOTOR_SAFE_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
         )
         # obs_high = np.array(
         #             [MOTOR_LIMIT_RAD, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
@@ -845,11 +845,11 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
         return np.array(
             [
-                motor_pos_norm,
+                motor_pos,
                 cos_theta,
                 sin_theta,
-                motor_vel_norm,
-                pen_vel_norm,
+                motor_vel,
+                pen_vel,
                 prev_act_norm,
             ],
             dtype=np.float32,
