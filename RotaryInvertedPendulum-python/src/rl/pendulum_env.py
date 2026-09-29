@@ -518,17 +518,17 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # which restores Markov property under action delay (POMDP→MDP).
 
         # Observation is now 5-dim: [motor_pos, theta_norm, motor_vel, pen_vel, prev_action]
-        # obs_high = np.array(
-        #     [MOTOR_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
-        # )
+        obs_high = np.array(
+            [1, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+        )
         # obs_high = np.array(
         #             [MOTOR_LIMIT_RAD, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
         #         )
-        # self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
+        self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
-        self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(6,), dtype=np.float32
-        )
+        # self.observation_space = spaces.Box(
+        #     low=-1.0, high=1.0, shape=(6,), dtype=np.float32
+        # )
 
         self._viewer = None
 
@@ -838,8 +838,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
         motor_pos_norm = np.clip(motor_pos/ np.pi, -1.0, 1.0)
-        motor_vel_norm = np.clip(self.filtered_arm_vel / self.max_velocity_rad_s, -1.0, 1.0)
-        pen_vel_norm   = np.clip(self.filtered_pend_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
+        motor_vel_norm = self.filtered_arm_vel #np.clip(self.filtered_arm_vel / self.max_velocity_rad_s, -1.0, 1.0)
+        pen_vel_norm   = self.filtered_pend_vel #np.clip(self.filtered_pend_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
         prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)
         
         # print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
