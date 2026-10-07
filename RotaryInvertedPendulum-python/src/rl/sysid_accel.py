@@ -37,6 +37,7 @@ import math
 import sys
 import time
 from pathlib import Path
+import datetime as _dt
 
 import numpy as np
 import mujoco
@@ -45,7 +46,7 @@ from lowlevel_client import LowLevelClient
 from pendulum_env import RotaryInvertedPendulumEnv, MAX_ACCEL_RAD_S2, MAX_VELOCITY_RAD_S
 
 
-SAMPLE_RATE_HZ = 200.0
+SAMPLE_RATE_HZ = 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Accel-mode sysid: real-rig + sim replay")
     p.add_argument("--port", default="/dev/cu.usbserial-1130",
                    help="serial port for the LowLevelServer-flashed Arduino")
-    p.add_argument("--baud", type=int, default=2_000_000)
+    p.add_argument("--baud", type=int, default=1_000_000)
     p.add_argument("--waveform", choices=["step", "chirp", "all"], default="all")
     p.add_argument("--sample-rate", type=float, default=SAMPLE_RATE_HZ,
                    help="state-sampling rate in Hz (max ~200 over 2 Mbaud)")
@@ -325,7 +326,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  replaying in sim (initial motor={initial_motor:+.3f}, pen={initial_pen:+.3f})...")
         sim = run_sim(fn, dur, args.sample_rate, initial_motor, initial_pen)
 
-        out_npz = f"/tmp/sysid_accel_{name}.npz"
+        
+        out_dir = make_output_dir(None)
+        out_npz = out_dir / f"sysid_accel_{name}.npz"
         np.savez(out_npz,
                  t=real[0], accel_cmd=real[1],
                  real_motor=real[2], real_pen=real[3],
@@ -333,11 +336,20 @@ def main(argv: list[str] | None = None) -> int:
                  waveform=name)
         print(f"  saved {out_npz}")
 
-        out_png = f"/tmp/sysid_accel_{name}.png"
+        out_png = out_dir / f"sysid_accel_{name}.png"
         plot_comparison(real, sim, name, out_png)
         print_stats(real, sim, name)
 
     return 0
+
+def make_output_dir(arg_out_dir: str | None) -> Path:
+    if arg_out_dir:
+        out = Path(arg_out_dir)
+    else:
+        ts = _dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        out = Path(__file__).resolve().parent / "sysid_runs" / ts
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
 
 if __name__ == "__main__":

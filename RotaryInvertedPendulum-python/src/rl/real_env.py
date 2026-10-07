@@ -50,6 +50,8 @@ from reward import RewardWeights, compute_reward
 from pendulum_env import (
     MOTOR_LIMIT_RAD,
     MOTOR_SAFE_LIMIT_RAD,
+    MAX_PENDULUM_VEL_RAD_S,
+    MAX_VELOCITY_RAD_S,
     PendulumParams,
     _wrap_pi,
 )
@@ -89,9 +91,9 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         *,
         port: str = "/dev/cu.usbserial-110",
         baud: int = 2_000_000,
-        control_freq_hz: float = 35.0,  # canonical for this rig — see docs/control_rate_selection.md
-        max_accel_rad_s2: float = 100.0,
-        episode_length_s: float = 6.0,
+        control_freq_hz: float = 40.0,  # canonical for this rig — see docs/control_rate_selection.md
+        max_accel_rad_s2: float = 150.0,
+        episode_length_s: float = 5.0,
         # Max seconds to wait for the pendulum to come to rest between
         # episodes before giving up. While waiting, polls pen_vel; once
         # |pen_vel| stays below REST_THRESHOLD_RAD_S for REST_DURATION_S
@@ -184,7 +186,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         # Observation bounds match the sim env exactly. Last dim is
         # prev_action ∈ [-1, 1], present from the accel-mode rework.
         obs_high = np.array(
-            [MOTOR_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+            [MOTOR_SAFE_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
         )
         self.observation_space = spaces.Box(
             low=-obs_high, high=obs_high, dtype=np.float32

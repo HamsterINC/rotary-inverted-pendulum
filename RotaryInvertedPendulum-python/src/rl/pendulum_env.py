@@ -55,6 +55,8 @@ DEFAULT_PARAMS_PATH = HERE / "sysid_params.json"
 MOTOR_LIMIT_RAD = math.radians(145.0)
 MOTOR_SAFE_LIMIT_RAD = math.radians(125.0)
 
+NORMILIZED_OBS = True  # If True, observation is normalized to [-1, 1] range per dimension
+
 # Arm geometry, measured 2026-05-02 against the OnShape CAD + a kitchen
 # scale. The arm is 65 mm from the stepper shaft to the pendulum joint
 # (where a single 608 bearing now carries the pendulum-link shaft —
@@ -72,7 +74,7 @@ GRAVITY = 9.81
 ENCODER_CPR = 4096
 PENDULUM_LSB_RAD = 2.0 * math.pi / ENCODER_CPR
 # Scaling constants (match these identically on your FPGA pipeline)
-MAX_PENDULUM_VEL_RAD_S = 30.0  # Typical max swing-up velocity
+MAX_PENDULUM_VEL_RAD_S = 100.0  # Typical max swing-up velocity
 # PENDULUM_LSB_RAD = 2.0 * math.pi / 4096.0
 
 # Pendulum mass / COM / I_com_swing come from `pendulum_geometry.py`,
@@ -517,18 +519,19 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # — gives the policy an implicit read on its own command pipeline,
         # which restores Markov property under action delay (POMDP→MDP).
 
-        # Observation is now 5-dim: [motor_pos, theta_norm, motor_vel, pen_vel, prev_action]
-        obs_high = np.array(
-            [MOTOR_SAFE_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
-        )
-        # obs_high = np.array(
-        #             [MOTOR_LIMIT_RAD, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
-        #         )
-        self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
-
-        # self.observation_space = spaces.Box(
-        #     low=-1.0, high=1.0, shape=(6,), dtype=np.float32
-        # )
+        if NORMILIZED_OBS:
+            self.observation_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(6,), dtype=np.float32
+            )
+        else:
+            # Observation is now 5-dim: [motor_pos, theta_norm, motor_vel, pen_vel, prev_action]
+            obs_high = np.array(
+                [MOTOR_SAFE_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+            )
+            # obs_high = np.array(
+            #             [MOTOR_LIMIT_RAD, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+            #         )
+            self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
         self._viewer = None
 
@@ -832,16 +835,18 @@ class RotaryInvertedPendulumEnv(gym.Env):
         cos_theta = math.cos(theta)
         sin_theta = math.sin(theta)
 
-        alpha = 1
-        self.filtered_arm_vel = (alpha * motor_vel) + ((1.0 - alpha) * self.filtered_arm_vel)
-        self.filtered_pend_vel = (alpha * pen_vel) + ((1.0 - alpha) * self.filtered_pen_vel)
-
-        # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
-        motor_pos_norm = np.clip(motor_pos/ np.pi, -1.0, 1.0)
-        motor_vel_norm = self.filtered_arm_vel #np.clip(self.filtered_arm_vel / self.max_velocity_rad_s, -1.0, 1.0)
-        pen_vel_norm   = self.filtered_pend_vel #np.clip(self.filtered_pend_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
-        prev_act_norm  = np.clip(self._prev_action, -1.0, 1.0)
-        
+        if NORMILIZED_OBS:
+            # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
+            motor_pos = np.clip(motor_pos / MOTOR_LIMIT_RAD, -1.0, 1.0)
+            motor_vel = np.clip(self.motor_vel / (self.max_velocity_rad_s * 1.5), -1.0, 1.0) #Leaving extra room for error.
+            pen_vel = np.clip(self.pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
+            prev_act  = np.clip(self._prev_action, -1.0, 1.0)
+        else:
+            motor_pos = motor_pos 
+            motor_vel = motor_vel
+            pen_vel   = pen_vel
+            prev_act = np.clip(self._prev_action, -1.0, 1.0)
+            
         # print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
         return np.array(
             [
@@ -850,7 +855,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
                 sin_theta,
                 motor_vel,
                 pen_vel,
-                prev_act_norm,
+                prev_act,
             ],
             dtype=np.float32,
         )

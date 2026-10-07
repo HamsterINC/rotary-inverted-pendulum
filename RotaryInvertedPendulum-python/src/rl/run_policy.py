@@ -78,8 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Run a trained SAC policy on the device")
     p.add_argument("--policy", required=True, help="path to a .zip checkpoint")
     p.add_argument("--port", required=True, help="serial port, e.g. /dev/cu.usbserial-1130")
-    p.add_argument("--baud", type=int, default=2_000_000)
-    p.add_argument("--control-freq", type=float, default=35.0,
+    p.add_argument("--baud", type=int, default=1_000_000)
+    p.add_argument("--control-freq", type=float, default=40.0,
                    help="control loop frequency in Hz. MUST match the rate "
                         "the policy was trained at — see "
                         "docs/control_rate_selection.md. Default 35 Hz "
@@ -186,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         # Prime the firmware's command state with zero accel before engaging
         # so the motor stays at rest until the policy issues its first action.
         client.set_acceleration(0.0)
+        client.tare_pendulum()
 
         if not args.dry_run:
             client.engage_motor()

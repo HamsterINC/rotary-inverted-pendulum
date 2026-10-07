@@ -275,7 +275,6 @@ def record_free_swing(
     np.savez(path, **rec)
     return path
 
-
 def move_motor_to(
     client: LowLevelClient, target_pos: float, *,
     max_accel: float = 40.0, kp: float = 20.0, kd: float = 10.0,
@@ -312,16 +311,15 @@ def move_motor_to(
     t_start = next_tick
     settle_count = 0
     settle_needed = int(0.3 * control_hz)
-    client.engage_motor()
     while time.monotonic() - t_start < timeout_s:
         s = client.get_state()
-        print(s)
         motor_pos = -s.motor_pos_rad
         motor_vel = -s.motor_vel_rad_s
 
         error = target_pos - motor_pos
         accel = kp * error - kd * motor_vel
         accel = float(np.clip(accel, -max_accel, max_accel))
+
         client.set_acceleration(accel)
 
         if log is not None:
@@ -799,24 +797,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     type=Path)
 
     return p.parse_args(argv)
+    
 
+def stream_state_to_terminal(args: argparse.Namespace, duration_s: float = 5.0, sample_hz: float = 20.0) -> None:
+    """Stream the rig state to the terminal for a few seconds."""
+    print(_bold(f"\nStreaming state for {duration_s:.0f}s (press Ctrl+C to stop)"))
+    dt = 1.0 / sample_hz
+    next_tick = time.monotonic()
+    t_start = next_tick
+    try:
+        with LowLevelClient(args.port, baud=args.baud) as client:
+            if not client.wait_until_ready():
+                print(_red("Arduino did not respond.")); sys.exit(2)
+            client.tare_pendulum()
+            while time.monotonic() - t_start < duration_s:
+                s = client.get_state()
+                print(f"t={time.monotonic() - t_start:.2f}s | "
+                    f"pendulum={-s.pendulum_pos_rad:.3f} rad | "
+                    f"motor={-s.motor_pos_rad:.3f} rad | "
+                    f"pendulum_vel={-s.pendulum_vel_rad_s:.3f} rad/s | "
+                    f"motor_vel={-s.motor_vel_rad_s:.3f} rad/s")
+                next_tick += dt
+                sleep_for = next_tick - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        print(_dim("\nStreaming stopped by user."))
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
-    if args.cmd == "collect":
-        collect_data(args)
-    elif args.cmd == "fit":
-        fit_data(args.in_dir, args.out_json)
-    elif args.cmd == "validate-motor":
-        validate_motor(args)
-    else:
-        # Full pipeline
-        out_dir = collect_data(args)
-        fit_data(out_dir, args.out_json)
-        print(_bold("\nDone. Use the policy training scripts next:"))
-        print(_dim(f"  ./curriculum_train.sh <run-prefix>"))
-    return 0
+    stream_state_to_terminal(args, duration_s=30.0, sample_hz=20.0)
 
 
 if __name__ == "__main__":

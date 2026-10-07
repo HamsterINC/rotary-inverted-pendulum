@@ -66,7 +66,7 @@ class StudentMLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        return torch.tanh(self.fc3(x))
+        return self.fc3(x)
 
 
 def _student_predict_factory(model: StudentMLP, device: str = "cpu"):
@@ -143,7 +143,7 @@ def stage_dataset(
     device: str = "cpu",
     batch_size: int = 4096,
     sim_augment_steps: int = 0,
-    control_freq_hz: float = 35.0,
+    control_freq_hz: float = 40.0,
     seed: int = 0,
 ) -> None:
     """Re-evaluate the teacher's deterministic action over the buffer's observations.
@@ -385,15 +385,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="path to the teacher's replay_buffer.pkl (real-rig data)")
     p.add_argument("--out-dir", required=True, type=Path,
                    help="output directory; dataset.npz and student.pt go here")
-    p.add_argument("--hidden", type=int, default=32,
+    p.add_argument("--hidden", type=int, default=128,
                    help="student hidden-layer width (32 was the production "
                         "value for async_35hz_v2_extend; 16 underfits)")
-    p.add_argument("--epochs", type=int, default=800)
+    p.add_argument("--epochs", type=int, default=400)
     p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cpu")
-    p.add_argument("--control-freq", type=float, default=35.0,
+    p.add_argument("--control-freq", type=float, default=40.0,
                    help="must match the teacher's training rate")
     p.add_argument("--sim-augment-steps", type=int, default=100000,
                    help="add N teacher sim-rollout steps to the real-rig buffer. "

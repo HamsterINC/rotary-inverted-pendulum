@@ -243,7 +243,7 @@ class AsyncControlLoop:
             self.last_error = e
             raise
 
-        next_tick = time.monotonic()
+        next_tick = time.perf_counter()
         last_tick = next_tick
         stats = TickStats()
         cumulative_reward = 0.0
@@ -285,16 +285,16 @@ class AsyncControlLoop:
                     next_tick += self._dt * (1.0 + jitter)
                 else:
                     next_tick += self._dt
-                sleep_for = next_tick - time.monotonic()
+                sleep_for = next_tick - time.perf_counter()
                 slept = sleep_for > 0
                 if slept:
                     if sleep_for > 0.001:
                         time.sleep(sleep_for - 0.001)
-                    while time.monotonic() < next_tick:
+                    while time.perf_counter() < next_tick:
                         pass
 
                 # 3. Measure tick health (for telemetry + violation check)
-                now = time.monotonic()
+                now = time.perf_counter()
                 overrun = now - next_tick
                 tick_dt_ms = (now - last_tick) * 1000.0
                 last_tick = now

@@ -69,7 +69,7 @@ class LowLevelClient:
             c.disengage_motor()  # also called automatically by __exit__
     """
 
-    def __init__(self, port: str, baud: int = 2_000_000, timeout: float = 0.5):
+    def __init__(self, port: str, baud: int = 1_000_000, timeout: float = 0.5):
         self.port = port
         self.baud = baud
         self.timeout = timeout

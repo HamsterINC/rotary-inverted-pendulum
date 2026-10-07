@@ -31,21 +31,23 @@ def float_to_q_format(val, int_bits, frac_bits, total_bits=16):
     return f"{clamped_val:0{hex_len}x}"
 
 def main():
-    zip_path = "Saved_runs/1509.zip"
+    # zip_path = "runs/async_FPGA/last.zip"
 
-    with zipfile.ZipFile(zip_path, 'r') as archive:
-        with archive.open('policy.pth') as f:
-            checkpoint = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=True)
-
+    # with zipfile.ZipFile(zip_path, 'r') as archive:
+    #     with archive.open('policy.pth') as f:
+    #         checkpoint = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=True)
+    with open('runs/async_FPGA/distill_h128/student.pt', 'rb') as f:
+        checkpoint = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=True)
+    print(checkpoint['state_dict'].keys())
     # Extract weight matrices & biases
-    w1 = checkpoint['mlp_extractor.policy_net.0.weight'].detach().numpy()
-    b1 = checkpoint['mlp_extractor.policy_net.0.bias'].detach().numpy()
+    w1 = checkpoint['state_dict']['fc1.weight'].detach().numpy()
+    b1 = checkpoint['state_dict']['fc1.bias'].detach().numpy()
 
-    w2 = checkpoint['mlp_extractor.policy_net.2.weight'].detach().numpy()
-    b2 = checkpoint['mlp_extractor.policy_net.2.bias'].detach().numpy()
+    w2 = checkpoint['state_dict']['fc2.weight'].detach().numpy()
+    b2 = checkpoint['state_dict']['fc2.bias'].detach().numpy()
 
-    w3 = checkpoint['action_net.weight'].detach().numpy()
-    b3 = checkpoint['action_net.bias'].detach().numpy()
+    w3 = checkpoint['state_dict']['fc3.weight'].detach().numpy()
+    b3 = checkpoint['state_dict']['fc3.bias'].detach().numpy()
 
     # =========================================================================
     # CONFIGURATION: Set Fixed-Point (Q-Format) parameters per layer
@@ -56,9 +58,9 @@ def main():
     #   Q2.14 -> int_bits=2,  frac_bits=14
     # =========================================================================
     LAYER_Q_CONFIGS = {
-        'L1': {'int_bits': 8, 'frac_bits': 8},   # Layer 1 Q-format
-        'L2': {'int_bits': 8, 'frac_bits': 8},   # Layer 2 Q-format
-        'L3': {'int_bits': 8, 'frac_bits': 8},   # Layer 3 Q-format
+        'L1': {'int_bits': 7, 'frac_bits': 9},   # Layer 1 Q-format
+        'L2': {'int_bits': 7, 'frac_bits': 9},   # Layer 2 Q-format
+        'L3': {'int_bits': 7, 'frac_bits': 9},   # Layer 3 Q-format
     }
 
     # Dynamic Topology Discovery

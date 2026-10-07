@@ -70,7 +70,7 @@ def export(student_path: Path, header_path: Path, *, source_name: str | None = N
     header.append(f"// params: {n_params}, flash bytes: {flash_bytes}")
     header.append(f"// distill val_mse: {val_mse:.6f}")
     header.append("#pragma once")
-    header.append("#include <avr/pgmspace.h>")
+    header.append("#include <pgmspace.h>")
     header.append("")
     header.append(f"#define POLICY_OBS_DIM     {obs_dim}")
     header.append(f"#define POLICY_HIDDEN_DIM  {hidden}")

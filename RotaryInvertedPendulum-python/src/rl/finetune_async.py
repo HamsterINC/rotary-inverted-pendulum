@@ -48,6 +48,7 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
+import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.utils import configure_logger
 
@@ -105,10 +106,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="path to a sim-trained or previously-finetuned SAC checkpoint")
     p.add_argument("--port", default="/dev/cu.usbserial-1130",
                    help="serial port for the LowLevelServer Arduino")
-    p.add_argument("--baud", type=int, default=2_000_000)
+    p.add_argument("--baud", type=int, default=1_000_000)
     p.add_argument("--episodes", type=int, default=50,
                    help="number of real-device episodes to collect")
-    p.add_argument("--episode-length-s", type=float, default=6.0)
+    p.add_argument("--episode-length-s", type=float, default=8.0)
     p.add_argument("--reset-settle-s", type=float, default=15.0,
                    help="max seconds to wait for the pendulum to come to rest "
                         "between episodes (motor disengaged, waiting for "
@@ -117,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
                         "tares and proceeds. On timeout, skips the tare "
                         "and proceeds anyway. 15 s gives the operator time "
                         "to stop the pendulum manually between episodes.")
-    p.add_argument("--control-freq", type=float, default=35.0,
+    p.add_argument("--control-freq", type=float, default=40.0,
                    help="strict control rate in Hz; this orchestrator holds "
                         "this rate even at high --gradient-steps. 35 Hz is "
                         "the canonical operating point for this rig — see "
@@ -142,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                         "they were collected at the wrong rate)")
     p.add_argument("--device", default="cpu",
                    help="torch device. CPU is fine for this small policy")
-    p.add_argument("--timing-violation-threshold-ms", type=float, default=5.0,
+    p.add_argument("--timing-violation-threshold-ms", type=float, default=10.0,
                    help="control-loop overrun above this for 3 consecutive "
                         "ticks raises TimingViolation and disengages motor")
     p.add_argument("--deterministic", action="store_true",
@@ -169,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
                         "sim and fine-tune should agree on the dt distribution. "
                         "Set 0.0 to disable for strict reproducible timing.")
     args = p.parse_args(argv if argv is not None else sys.argv[1:])
+
+    torch.set_num_threads(1)  
 
     # ---- Setup ----
     run_name = args.run_name or f"async_finetune_{time.strftime('%Y-%m-%d_%H%M')}"
@@ -197,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     # absolute path from the box that trained it).
     model.tensorboard_log = str(run_dir / "tb")
     model.learning_rate = args.learning_rate
-
+  
     if args.resume_buffer:
         rb_path = Path(args.resume_buffer)
         if not rb_path.exists():
