@@ -268,8 +268,8 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         return np.array(
             [
                 motor_pos,
-                math.sin(theta),
                 math.cos(theta),
+                math.sin(theta),
                 self._motor_vel,
                 self._pen_vel,
                 self._prev_action,
