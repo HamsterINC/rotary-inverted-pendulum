@@ -11,92 +11,92 @@
   },
   "pendulum": {
     "derived": {
-      "coulomb_friction_N_m": 3.449113526986237e-06,
-      "inertia_measured_kg_m2": 2.7518651257494266e-05,
+      "coulomb_friction_N_m": 1.7126673338646418e-05,
+      "inertia_measured_kg_m2": 2.7461140175916068e-05,
       "inertia_predicted_kg_m2": 2.7075645139059407e-05,
-      "viscous_friction_N_m_s": 5.6270702722599566e-06
+      "viscous_friction_N_m_s": 3.6028597558453415e-06
     },
     "fit": {
-      "decay_constant_s_inv": 0.1039138724739439,
+      "decay_constant_s_inv": 0.06653322085847264,
       "decay_constant_s_inv_all_runs": [
-        0.18521147593740311,
-        0.1039138724739439,
-        0.08040779242257508
+        0.06653322085847264,
+        0.05368094721637416,
+        0.07486571105891512
       ],
-      "decay_constant_s_inv_stdev": 0.04490192795484579,
-      "decay_constant_visc_only_s_inv": 0.11302110768580034,
-      "delta_c_per_half_cycle_rad": 0.0016254240196097829,
+      "decay_constant_s_inv_stdev": 0.008714008834923225,
+      "decay_constant_visc_only_s_inv": 0.1057669372769164,
+      "delta_c_per_half_cycle_rad": 0.008071090151958758,
       "delta_c_per_half_cycle_rad_all_runs": [
-        0.0,
-        0.0016254240196097829,
-        0.005126609375036836
+        0.008071090151958758,
+        0.010120804641237208,
+        0.006370799162006024
       ],
-      "delta_c_per_half_cycle_rad_stdev": 0.0021391178301345746,
-      "envelope_rmse_combined_rad": 0.24081608498912122,
-      "envelope_rmse_visc_only_rad": 0.07890957856424023,
-      "initial_amplitude_rad": 1.342620655219847,
-      "mean_pair_amplitude_rad": 0.7633839518229169,
+      "delta_c_per_half_cycle_rad_stdev": 0.0015331470913102008,
+      "envelope_rmse_combined_rad": 0.012503879666408351,
+      "envelope_rmse_visc_only_rad": 0.028666432281525604,
+      "initial_amplitude_rad": 1.2735538195355551,
+      "mean_pair_amplitude_rad": 0.7723749457465279,
       "median_run_index": 0,
       "n_extrema_used": 37,
       "n_runs": 3,
-      "omega_d_rad_s": 11.866261203360944,
+      "omega_d_rad_s": 11.904982687287637,
       "omega_d_rad_s_all_runs": [
-        11.866261203360944,
         11.904982687287637,
-        11.866261203360944
+        11.879972219457201,
+        11.917527453027665
       ],
-      "omega_d_rad_s_stdev": 0.01825348257478043,
-      "omega_n_rad_s": 11.867706528104241,
+      "omega_d_rad_s_stdev": 0.01561085881722334,
+      "omega_n_rad_s": 11.905168602506063,
       "omega_n_rad_s_all_runs": [
-        11.867706528104241,
-        11.905436190140657,
-        11.866533628632727
+        11.905168602506063,
+        11.880093500438829,
+        11.917762603289278
       ],
-      "omega_n_rad_s_stdev": 0.01806873414502001,
-      "omega_n_small_amp_rad_s": 12.418576977087792,
+      "omega_n_rad_s_stdev": 0.015657198944069535,
+      "omega_n_small_amp_rad_s": 12.431574111308946,
       "omega_n_small_amp_rad_s_all_runs": [
-        12.360148576051865,
-        12.469604577321014,
-        12.418576977087792
+        12.409631843029898,
+        12.446538627344475,
+        12.431574111308946
       ],
-      "omega_n_small_amp_rad_s_stdev": 0.04471926038820021,
-      "period_s": 0.5294999999999972,
+      "omega_n_small_amp_rad_s_stdev": 0.015156628934232462,
+      "period_s": 0.5277777777777778,
       "period_s_all_runs": [
-        0.5294999999999972,
         0.5277777777777778,
-        0.5294999999999972
+        0.5288888888888889,
+        0.5272222222222223
       ],
-      "period_s_stdev": 0.0008118633413610043,
-      "r_per_half_cycle": 0.9729508457183591,
+      "period_s_stdev": 0.0006928995160692183,
+      "r_per_half_cycle": 0.9825958549313245,
       "r_per_half_cycle_all_runs": [
-        0.9521480531626745,
-        0.9729508457183591,
-        0.978937026291651
+        0.9825958549313245,
+        0.9859046545802079,
+        0.9804580355660631
       ],
-      "r_per_half_cycle_stdev": 0.011480609823504502,
-      "rest_angle_rad": -0.0631337890625,
-      "small_amp_period_s": 0.5059505061467211,
+      "r_per_half_cycle_stdev": 0.002240636949128058,
+      "rest_angle_rad": 0.0157177734375,
+      "small_amp_period_s": 0.5054215380065025,
       "small_amp_period_s_all_runs": [
-        0.508342215186105,
-        0.5038800764065186,
-        0.5059505061467211
+        0.5063152063377815,
+        0.5048138679597005,
+        0.5054215380065025
       ],
-      "small_amp_period_s_stdev": 0.0018232338158848773,
-      "zeta": 0.008728270918792452,
+      "small_amp_period_s_stdev": 0.0006166146732684959,
+      "zeta": 0.005588599630959218,
       "zeta_all_runs": [
-        0.015606341081893012,
-        0.008728270918792452,
-        0.006776013530064023
+        0.005588599630959218,
+        0.004518562687607744,
+        0.006281859569702483
       ],
-      "zeta_stdev": 0.0037873157124651557
+      "zeta_stdev": 0.0007253201819586154
     }
   },
   "run_meta": {
-    "collected_at": "2026-10-05T16:32:57",
+    "collected_at": "2026-10-12T14:29:48",
     "firmware": "LowLevelServer.ino",
-    "fitted_at": "2026-10-05T16:34:00",
-    "hanging_zero_rad": 3.147705078125,
-    "in_dir": "C:\\Users\\casper\\rotary-inverted-pendulum\\RotaryInvertedPendulum-python\\src\\rl\\sysid_runs\\2026-10-05_163244",
+    "fitted_at": "2026-10-12T14:36:34",
+    "hanging_zero_rad": 1.21875,
+    "in_dir": "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/RotaryInvertedPendulum-python/src/rl/sysid_runs/2026-10-12_142936",
     "n_free_swing_runs": 3,
     "wizard_version": "2026-05-20"
   }

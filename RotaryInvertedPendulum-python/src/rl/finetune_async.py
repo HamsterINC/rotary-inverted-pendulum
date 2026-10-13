@@ -46,11 +46,18 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+import zipfile
 
 import numpy as np
+if not hasattr(np, "_core"):
+    import numpy.core as _core
+    sys.modules["numpy._core"] = _core
+    sys.modules["numpy._core.numeric"] = _core.numeric
+
 import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.utils import configure_logger
+import io
 
 from async_control import (
     AsyncControlLoop,
@@ -59,12 +66,33 @@ from async_control import (
     TimingViolation,
     TransitionQueue,
 )
-from real_env import RealRotaryInvertedPendulumEnv
+from FPGA_env import RealRotaryInvertedPendulumEnv
 
 
 HERE = Path(__file__).resolve().parent
 RUNS_ROOT = HERE / "runs"
 
+
+def load_sac_policy_weights_only(zip_path: str, env, device: str = "cpu") -> SAC:
+    """Instantiate a fresh SAC model and load policy weights directly from the zip,
+
+    bypassing SB3's cloudpickle metadata (avoids CUDA/NumPy 2.x segfaults).
+    """
+    # 1. Initialize a clean SAC model on CPU
+    model = SAC("MlpPolicy", env=env, device=device, verbose=1)
+
+    # 2. Extract policy.pth directly from the zip archive
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        policy_bytes = archive.read("policy.pth")
+
+    # 3. Load the tensor dictionary strictly mapped to CPU
+    state_dict = torch.load(io.BytesIO(policy_bytes), map_location=torch.device(device))
+
+    # 4. Inject weights into the SAC actor & critics
+    model.policy.load_state_dict(state_dict)
+
+    print("Successfully injected policy weights into SAC model (metadata bypassed)!")
+    return model
 
 def _add_to_buffer(model: SAC, transitions, lock: threading.Lock) -> int:
     """Drain a list of `Transition`s into model.replay_buffer under lock.
@@ -195,7 +223,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Control: {args.control_freq} Hz")
 
     print(f"Loading policy from {args.policy}")
-    model = SAC.load(args.policy, env=env, device=args.device)
+
+
+    #model = SAC.load(args.policy, env=env, device=args.device)
+
+    model = load_sac_policy_weights_only(args.policy, env=env, device=args.device)
     # Override the loaded checkpoint's tensorboard_log (often a foreign
     # absolute path from the box that trained it).
     model.tensorboard_log = str(run_dir / "tb")

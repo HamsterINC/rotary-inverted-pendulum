@@ -37,7 +37,11 @@ from pathlib import Path
 
 import numpy as np
 
-from lowlevel_client import LowLevelClient
+FPGA = True
+if FPGA:
+    from FPGA_lowlevel_client import FpgaLowLevelClient as LowLevelClient
+else: 
+    from lowlevel_client import LowLevelClient
 from sysid_core import (
     DEFAULT_FREE_SWING_DURATION_S,
     DEFAULT_FREE_SWING_RUNS,
@@ -127,38 +131,38 @@ import serial.tools.list_ports
 #         if any(n in p.device for n in needles)
 #     ]
 
-def auto_detect_port():
-    ports = serial.tools.list_ports.comports()
-    candidates = [
-        p.device
-        for p in ports
-        if "USB" in p.description or "FTDI" in p.description or "Serial" in p.description
-    ]
-    if candidates:
-        return candidates[-1]
-    return None
+# def auto_detect_port():
+#     ports = serial.tools.list_ports.comports()
+#     candidates = [
+#         p.device
+#         for p in ports
+#         if "USB" in p.description or "FTDI" in p.description or "Serial" in p.description
+#     ]
+#     if candidates:
+#         return candidates[-1]
+#     return None
 
-def pick_port(arg_port: str | None) -> str:
-    if arg_port:
-        return arg_port
-    candidates = auto_detect_port()
-    if not candidates:
-        print(_red("No USB-serial ports detected. Pass --port explicitly."))
-        sys.exit(1)
-    if len(candidates) == 1:
-        return candidates[0]
-    print(_bold("Multiple candidate ports found:"))
-    for i, p in enumerate(candidates):
-        print(f"  [{i}] {p}")
-    while True:
-        s = input("Pick one [0]: ").strip() or "0"
-        try:
-            idx = int(s)
-            if 0 <= idx < len(candidates):
-                return candidates[idx]
-        except ValueError:
-            pass
-        print(_red("  invalid choice, try again"))
+# def pick_port(arg_port: str | None) -> str:
+#     if arg_port:
+#         return arg_port
+#     candidates = auto_detect_port()
+#     if not candidates:
+#         print(_red("No USB-serial ports detected. Pass --port explicitly."))
+#         sys.exit(1)
+#     if len(candidates) == 1:
+#         return candidates[0]
+#     print(_bold("Multiple candidate ports found:"))
+#     for i, p in enumerate(candidates):
+#         print(f"  [{i}] {p}")
+#     while True:
+#         s = input("Pick one [0]: ").strip() or "0"
+#         try:
+#             idx = int(s)
+#             if 0 <= idx < len(candidates):
+#                 return candidates[idx]
+#         except ValueError:
+#             pass
+#         print(_red("  invalid choice, try again"))
 
 
 def make_output_dir(arg_out_dir: str | None) -> Path:
@@ -195,7 +199,7 @@ def _record_state_stream(
     next_tick = t_start
     for i in range(n):
         s = client.get_state()
-        t[i] = time.monotonic() - t_start
+        t[i] = i * dt
         pen[i] = -s.pendulum_pos_rad
         motor[i] = -s.motor_pos_rad
         pvel[i] = -s.pendulum_vel_rad_s
@@ -428,7 +432,7 @@ def load_metadata(in_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def collect_data(args: argparse.Namespace) -> Path:
-    port = pick_port(args.port)
+    port = None #pick_port(args.port)
     out_dir = make_output_dir(args.out_dir)
     print(_bold(f"\nRecording session: {out_dir}"))
     print(_dim(f"Port: {port}"))
@@ -437,7 +441,7 @@ def collect_data(args: argparse.Namespace) -> Path:
         " — no operator measurement needed."
     ))
 
-    with LowLevelClient(port, baud=args.baud) as client:
+    with LowLevelClient(port=port, baud=args.baud) as client:
         if not client.wait_until_ready():
             print(_red("Arduino did not respond. Is LowLevelServer.ino flashed?"))
             sys.exit(2)

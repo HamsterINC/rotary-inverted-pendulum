@@ -41,12 +41,16 @@ import datetime as _dt
 
 import numpy as np
 import mujoco
+FPGA = True
+if FPGA:
+    from FPGA_lowlevel_client import FpgaLowLevelClient as LowLevelClient
+else: 
+    from lowlevel_client import LowLevelClient
 
-from lowlevel_client import LowLevelClient
-from pendulum_env import RotaryInvertedPendulumEnv, MAX_ACCEL_RAD_S2, MAX_VELOCITY_RAD_S
+from pendulum_env import RotaryInvertedPendulumEnv, MAX_ACCEL_RAD_S2, MAX_VELOCITY_RAD_S, _wrap_pi
 
 
-SAMPLE_RATE_HZ = 100.0
+SAMPLE_RATE_HZ = 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +122,7 @@ def run_real(port: str, baud: int, waveform_fn, duration: float,
     log_motor = np.zeros(n)
     log_pen = np.zeros(n)
 
-    with LowLevelClient(port, baud=baud) as client:
+    with LowLevelClient(port=port, baud=baud) as client:
         if not client.wait_until_ready():
             raise RuntimeError("LowLevelServer did not respond.")
         # Motor is disengaged (LowLevelServer boots that way). Prompt the
@@ -135,7 +139,7 @@ def run_real(port: str, baud: int, waveform_fn, duration: float,
         time.sleep(0.5)
 
         s0 = client.get_state()
-        t0 = s0.time_us * 1e-6
+        t0 = 0.0
         initial_motor = -s0.motor_pos_rad   # sim-frame
         initial_pen = -s0.pendulum_pos_rad  # sim-frame
         print(f"  initial: motor={initial_motor:+.3f} rad, pendulum={initial_pen:+.3f} rad")
@@ -147,10 +151,10 @@ def run_real(port: str, baud: int, waveform_fn, duration: float,
             accel = waveform_fn(t_wf)
             client.set_acceleration(accel)
             s = client.get_state()
-            log_t[i] = s.time_us * 1e-6 - t0
+            log_t[i] = t_wf
             log_accel[i] = accel
             log_motor[i] = -s.motor_pos_rad
-            log_pen[i] = -s.pendulum_pos_rad
+            log_pen[i] = _wrap_pi(-s.pendulum_pos_rad)
 
             next_tick += period
             sleep_for = next_tick - time.monotonic()
@@ -187,12 +191,13 @@ def run_sim(waveform_fn, duration: float, sample_rate: float,
         episode_length_s=duration + 1.0,
     )
     env.reset(seed=0)
-    env.data.qpos[env._motor_qpos_addr] = float(initial_motor)
-    env.data.qpos[env._pen_qpos_addr] = float(initial_pen) 
+    env.data.qpos[env._motor_qpos_addr] = 0.0 #float(initial_motor)
+    env.data.qpos[env._pen_qpos_addr] = 0.0 #float(initial_pen) 
     env.data.qvel[:] = 0.0
     env._motor_target = float(initial_motor)
     env._motor_vel = 0.0
     env._prev_action = 0.0
+    env._action_lag_tau_s = 0.0
     mujoco.mj_forward(env.model, env.data)
 
     log_t = np.arange(n) * period
@@ -213,6 +218,23 @@ def run_sim(waveform_fn, duration: float, sample_rate: float,
 
     return log_t, log_accel, log_motor, log_pen
 
+def read_data(in_dir: Path | str, waveform: str):
+    """Load a previously recorded .npz and fit the sim to the real data."""
+    in_dir = Path(in_dir) 
+    
+    # Now the / operator will work correctly
+    npz_path = in_dir / f"sysid_accel_{waveform}.npz"
+    if not npz_path.exists():
+        raise FileNotFoundError(f"Cannot find {npz_path}")
+    data = np.load(npz_path)
+    log_t = data["t"]
+    log_accel = data["accel_cmd"]
+    log_motor = data["real_motor"]
+    log_pen = data["real_pen"]
+    initial_motor = log_motor[0]
+    initial_pen   = log_pen[0]
+
+    return log_t, log_accel, log_motor, log_pen, initial_motor, initial_pen
 
 # ---------------------------------------------------------------------------
 # Plot + stats
@@ -287,14 +309,17 @@ def print_stats(real, sim, name: str):
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Accel-mode sysid: real-rig + sim replay")
-    p.add_argument("--port", default="/dev/cu.usbserial-1130",
+    p.add_argument("--port", default=None,
                    help="serial port for the LowLevelServer-flashed Arduino")
     p.add_argument("--baud", type=int, default=1_000_000)
     p.add_argument("--waveform", choices=["step", "chirp", "all"], default="all")
     p.add_argument("--sample-rate", type=float, default=SAMPLE_RATE_HZ,
                    help="state-sampling rate in Hz (max ~200 over 2 Mbaud)")
-    p.add_argument("--skip-real", action="store_true",
-                   help="skip real-rig recording; sim only (for testing the script)")
+    sub = p.add_subparsers(dest="cmd", help="Sub-commands")
+    pf = sub.add_parser("fit", help="fit parameters from a collected directory")
+    pf.add_argument("--in-dir", default=None,
+                   help="skip real-rig recording; sim only (for testing the script)")   
+    pf.add_argument("--waveform", choices=["step", "chirp", "all"], required=True)            
     args = p.parse_args(argv if argv is not None else sys.argv[1:])
 
     todo = []
@@ -306,14 +331,13 @@ def main(argv: list[str] | None = None) -> int:
     for name, fn, dur in todo:
         print(f"\n=== {name} ({dur:.1f}s, {args.sample_rate:.0f} Hz sampling) ===")
 
-        if args.skip_real:
-            print("  --skip-real: synthesising real_data = zero state")
+        if args.cmd == "fit":
+            print("  --fit: synthesising sim data, fetching real data")
             n = int(dur * args.sample_rate)
-            t_arr = np.arange(n) / args.sample_rate
-            accel = np.array([fn(ti) for ti in t_arr])
-            real = (t_arr, accel, np.zeros(n), np.zeros(n))
-            initial_motor = 0.0
-            initial_pen = 0.0
+            real_t, real_accel, real_m, real_p, initial_motor, initial_pen = read_data(args.in_dir, waveform=name)
+            # t_arr = np.arange(n) / args.sample_rate
+            # accel = np.array([fn(ti) for ti in t_arr])
+            real = (real_t, real_accel, real_m, real_p)
         else:
             real_t, real_accel, real_m, real_p, initial_motor, initial_pen = run_real(
                 args.port, args.baud, fn, dur, args.sample_rate,

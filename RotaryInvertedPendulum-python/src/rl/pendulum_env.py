@@ -53,9 +53,9 @@ DEFAULT_PARAMS_PATH = HERE / "sysid_params.json"
 # Hard-stop on the motor joint. Matches the lid-boss mechanical limit of ±135°,
 # but we clamp the policy at ±125° so the policy never *commands* a stop hit.
 MOTOR_LIMIT_RAD = math.radians(145.0)
-MOTOR_SAFE_LIMIT_RAD = math.radians(125.0)
+MOTOR_SAFE_LIMIT_RAD = math.radians(145.0)
 
-NORMILIZED_OBS = True  # If True, observation is normalized to [-1, 1] range per dimension
+NORMILIZED_OBS = False  # If True, observation is normalized to [-1, 1] range per dimension
 
 # Arm geometry, measured 2026-05-02 against the OnShape CAD + a kitchen
 # scale. The arm is 65 mm from the stepper shaft to the pendulum joint
@@ -258,7 +258,7 @@ def build_mjcf(p: PendulumParams) -> str:
     I_pen_at_arm_tip  = p.pendulum_mass_kg * ARM_LENGTH_M ** 2
     I_pen_self        = p.pendulum_mass_kg * p.pendulum_com_m ** 2 + PENDULUM_I_COM_SWING_KG_M2
     I_motor_joint     = I_arm_about_motor + I_pen_at_arm_tip + I_pen_self
-    kp = 100.0
+    kp = 200.0
     kv = 2.0 * math.sqrt(kp * I_motor_joint)  # critical damping
 
     return f"""<?xml version="1.0"?>
@@ -838,8 +838,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         if NORMILIZED_OBS:
             # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
             motor_pos = np.clip(motor_pos / MOTOR_LIMIT_RAD, -1.0, 1.0)
-            motor_vel = np.clip(self.motor_vel / (self.max_velocity_rad_s * 1.5), -1.0, 1.0) #Leaving extra room for error.
-            pen_vel = np.clip(self.pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
+            motor_vel = np.clip(motor_vel / (self.max_velocity_rad_s * 1.5), -1.0, 1.0) #Leaving extra room for error.
+            pen_vel = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
             prev_act  = np.clip(self._prev_action, -1.0, 1.0)
         else:
             motor_pos = motor_pos 

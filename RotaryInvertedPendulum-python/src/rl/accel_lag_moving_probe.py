@@ -34,7 +34,12 @@ from pathlib import Path
 
 import numpy as np
 
-from lowlevel_client import LowLevelClient
+
+FPGA = True
+if FPGA: 
+    from FPGA_lowlevel_client import LowLevelClient
+else:
+    from lowlevel_client import LowLevelClient
 
 
 SAFETY_POS_RAD = 1.5  # ~86° — abort if motor crosses this
