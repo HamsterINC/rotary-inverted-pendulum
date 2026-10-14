@@ -246,10 +246,10 @@ def evaluate(args: argparse.Namespace) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train SAC on the rotary inverted pendulum")
-    p.add_argument("--total-steps", type=int, default=500_000)
+    p.add_argument("--total-steps", type=int, default=180_000)
     p.add_argument("--eval-freq", type=int, default=20_000,
                    help="how often (env steps) to run the eval callback")
-    p.add_argument("--checkpoint-freq", type=int, default=100_000)
+    p.add_argument("--checkpoint-freq", type=int, default=60_000)
     p.add_argument("--log-interval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto",
@@ -272,15 +272,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="lower bound on action_delay_steps sampled per episode")
     p.add_argument("--dr-delay-max", type=int, default=None,
                    help="upper bound on action_delay_steps. Set this to override env defaults.")
-    p.add_argument("--dr-action-lag-tau-min", type=float, default=0.0,
+    p.add_argument("--dr-action-lag-tau-min", type=float, default=0.02,
                    help="lower bound on first-order action-lag time constant "
                         "(seconds) sampled per episode.")
-    p.add_argument("--dr-action-lag-tau-max", type=float, default=None,
+    p.add_argument("--dr-action-lag-tau-max", type=float, default=0.06,
                    help="upper bound on first-order action-lag time constant "
                         "(seconds). Continuous analogue of --dr-delay-max. "
                         "Set this to override env defaults. See "
                         "docs/transport_delay.md.")
-    p.add_argument("--control-freq", type=float, default=40.0,
+    p.add_argument("--control-freq", type=float, default=50.0,
                    help="sim control rate (Hz). Must match the rate used in "
                         "fine-tuning and deployment. 35 Hz is the empirically-best "
                         "operating point for this rig — see "
@@ -291,7 +291,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "envelope (~196 rad/s² at 50 kSteps/s²). Bumped from "
                         "100 after observing the policy saturating accel_cmd "
                         "in the first accel-mode deployment.")
-    p.add_argument("--max-velocity-rad-s", type=float, default=None,
+    p.add_argument("--max-velocity-rad-s", type=float, default=5.0,
                    help="motor angular-velocity saturation cap (rad/s). "
                         "Default None → env default (5.0). Lower values "
                         "force the policy below the Kapitza parametric "
