@@ -71,10 +71,10 @@ GRAVITY = 9.81
 
 # AS5600 encoder resolution.
 
-ENCODER_CPR = 4096
+ENCODER_CPR = 1000
 PENDULUM_LSB_RAD = 2.0 * math.pi / ENCODER_CPR
 # Scaling constants (match these identically on your FPGA pipeline)
-MAX_PENDULUM_VEL_RAD_S = 100.0  # Typical max swing-up velocity
+MAX_PENDULUM_VEL_RAD_S = 32.0  # Typical max swing-up velocity
 # PENDULUM_LSB_RAD = 2.0 * math.pi / 4096.0
 
 # Pendulum mass / COM / I_com_swing come from `pendulum_geometry.py`,
@@ -146,7 +146,7 @@ DR_OBS_NOISE_STD_POS_RAD = 0.005
 # physics, the reward, and the eval env are unchanged). 0.05 rad ≈ 2.9°
 # brackets the measured rest band with headroom.
 DR_THETA_BIAS_MAX_RAD = 0.05
-DR_OBS_NOISE_STD_VEL_RAD_S = 0.05
+DR_OBS_NOISE_STD_VEL_RAD_S = 0.005
 DR_CONTROL_DT_JITTER_FRAC = 0.05        # ±5% jitter on physics steps per control.
                                          # Empirically valuable: the legacy
                                          # variable-rate fine-tune (rate

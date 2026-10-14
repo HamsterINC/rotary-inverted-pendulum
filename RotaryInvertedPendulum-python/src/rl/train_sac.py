@@ -130,16 +130,20 @@ def train(args: argparse.Namespace) -> Path:
         print(f"Resuming from {args.resume}")
         model = SAC.load(args.resume, env=train_env, device=args.device)
     else:
+        policy_kwargs = dict(
+            net_arch=dict(pi=[128, 128], qf=[128, 128]),  # Clean size for FPGA deployment
+        )
         model = SAC(
             "MlpPolicy",
             train_env,
             learning_rate=3e-4,
-            buffer_size=200_000,
+            buffer_size=400_000,
             batch_size=256,
             tau=0.005,
-            gamma=0.99,
+            gamma=0.995,
             train_freq=1,
             gradient_steps=1,
+            # policy_kwargs=policy_kwargs,
             ent_coef="auto",
             verbose=1,
             tensorboard_log=str(run_dir / "tb"),
@@ -243,9 +247,9 @@ def evaluate(args: argparse.Namespace) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train SAC on the rotary inverted pendulum")
     p.add_argument("--total-steps", type=int, default=500_000)
-    p.add_argument("--eval-freq", type=int, default=10_000,
+    p.add_argument("--eval-freq", type=int, default=20_000,
                    help="how often (env steps) to run the eval callback")
-    p.add_argument("--checkpoint-freq", type=int, default=50_000)
+    p.add_argument("--checkpoint-freq", type=int, default=100_000)
     p.add_argument("--log-interval", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto",
