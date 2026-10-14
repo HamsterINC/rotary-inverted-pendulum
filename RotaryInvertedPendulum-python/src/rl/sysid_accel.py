@@ -47,7 +47,7 @@ if FPGA:
 else: 
     from lowlevel_client import LowLevelClient
 
-from pendulum_env import RotaryInvertedPendulumEnv, MAX_ACCEL_RAD_S2, MAX_VELOCITY_RAD_S, _wrap_pi
+from pendulum_env import RotaryInvertedPendulumEnv, MAX_ACCEL_RAD_S2, MAX_VELOCITY_RAD_S, _wrap_pi  
 
 
 SAMPLE_RATE_HZ = 500.0
@@ -139,7 +139,7 @@ def run_real(port: str, baud: int, waveform_fn, duration: float,
         time.sleep(0.5)
 
         s0 = client.get_state()
-        t0 = 0.0
+        t0 = s0.time_us * 1e-6
         initial_motor = -s0.motor_pos_rad   # sim-frame
         initial_pen = -s0.pendulum_pos_rad  # sim-frame
         print(f"  initial: motor={initial_motor:+.3f} rad, pendulum={initial_pen:+.3f} rad")
@@ -151,10 +151,10 @@ def run_real(port: str, baud: int, waveform_fn, duration: float,
             accel = waveform_fn(t_wf)
             client.set_acceleration(accel)
             s = client.get_state()
-            log_t[i] = t_wf
+            log_t[i] = s.time_us * 1e-6 - t0
             log_accel[i] = accel
             log_motor[i] = -s.motor_pos_rad
-            log_pen[i] = _wrap_pi(-s.pendulum_pos_rad)
+            log_pen[i] = -s.pendulum_pos_rad
 
             next_tick += period
             sleep_for = next_tick - time.monotonic()
@@ -197,7 +197,7 @@ def run_sim(waveform_fn, duration: float, sample_rate: float,
     env._motor_target = float(initial_motor)
     env._motor_vel = 0.0
     env._prev_action = 0.0
-    env._action_lag_tau_s = 0.0
+    # env._action_lag_tau_s = 0.004
     mujoco.mj_forward(env.model, env.data)
 
     log_t = np.arange(n) * period

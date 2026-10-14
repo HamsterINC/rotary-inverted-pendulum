@@ -194,12 +194,12 @@ def _record_state_stream(
     motor = np.zeros(n, dtype=np.float64)
     pvel = np.zeros(n, dtype=np.float64)
     mvel = np.zeros(n, dtype=np.float64)
-
-    t_start = time.monotonic()
-    next_tick = t_start
+    s = client.get_state() 
+    t_start = s.time_us * 1e-6
+    next_tick = time.monotonic()
     for i in range(n):
         s = client.get_state()
-        t[i] = i * dt
+        t[i] = s.time_us* 1e-6 - t_start
         pen[i] = -s.pendulum_pos_rad
         motor[i] = -s.motor_pos_rad
         pvel[i] = -s.pendulum_vel_rad_s
@@ -232,6 +232,7 @@ def record_tare(client: LowLevelClient, out_dir: Path,
     client.disengage_motor()
     time.sleep(0.5)
     _prompt_enter("\n  Pendulum still and undisturbed?")
+    client.tare_pendulum()
 
     print(_dim(f"  Recording {duration_s:.0f}s..."))
     rec = _record_state_stream(client, duration_s, sample_hz)
@@ -260,6 +261,7 @@ def record_free_swing(
         "    When ready, press Enter. After the countdown, slide the box\n"
         "    out perpendicular to the swing plane to release."
     ))
+    client.engage_motor()
     _prompt_enter("    Ready to release")
     print("    Releasing in...")
     _countdown(3)
@@ -317,6 +319,7 @@ def move_motor_to(
     settle_count = 0
     settle_needed = int(0.3 * control_hz)
     client.engage_motor()
+    client.tare_pendulum()
     while time.monotonic() - t_start < timeout_s:
         s = client.get_state()
         print(s)
@@ -555,7 +558,7 @@ def fit_data(in_dir: Path, out_json: Path) -> dict:
     # measured/predicted inertia pair is included for traceability.
     pendulum_payload = {
         "derived": {
-            "viscous_friction_N_m_s": derived["viscous_friction_N_m_s"],
+            "viscous_friction_N_m_s": derived["viscous_friction_N_m_s"]-6.5e-7, #
             "coulomb_friction_N_m": derived["coulomb_friction_N_m"],
             "inertia_predicted_kg_m2": derived["inertia_predicted_kg_m2"],
             "inertia_measured_kg_m2": derived["inertia_measured_kg_m2"],
@@ -643,6 +646,7 @@ def plot_free_swing_compare(in_dir: Path, derived: dict, *, out_dir: Path) -> No
 
     n = len(real_t_trim)
     sim_pen = np.zeros(n)
+    sim_pen[0] = release_pos; idx = 1; next_t = sample_dt
     sim_dt = 1.0 / 200.0
     t = 0.0; idx = 0; next_t = 0.0
     while idx < n:
@@ -659,16 +663,22 @@ def plot_free_swing_compare(in_dir: Path, derived: dict, *, out_dir: Path) -> No
     # Fit envelopes
     def _fit(t, y):
         crossings = np.where(np.diff(np.sign(y)) != 0)[0]
+        segs = [(crossings[k] + 1, crossings[k + 1] + 1) for k in range(len(crossings) - 1)]
+        if not segs:
+            return None
+        lens = np.array([b - a for a, b in segs])
+        min_len = 0.5 * np.median(lens)          # a true half cycle is ~26 samples
         pt, pa = [], []
-        for k in range(len(crossings) - 1):
-            a, b = crossings[k] + 1, crossings[k + 1] + 1
+        for (a, b), L in zip(segs, lens):
+            if L < min_len:                       # spurious zero-sample segment
+                continue
             j = a + int(np.argmax(np.abs(y[a:b])))
             pt.append(t[j]); pa.append(abs(y[j]))
         pt, pa = np.array(pt), np.array(pa)
         if len(pt) < 3:
             return None
         period = 2 * np.median(np.diff(pt))
-        decay = -float(np.polyfit(pt, np.log(pa + 1e-9), 1)[0])
+        decay = -float(np.polyfit(pt, np.log(pa), 1)[0])
         return period, decay, pt, pa
 
     ix_start = int(0.3 / sample_dt)
@@ -753,9 +763,9 @@ def plot_motor_sweep(npz_path: Path, *, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def validate_motor(args: argparse.Namespace) -> None:
-    port = pick_port(args.port)
+    port = None #pick_port(args.port)
     out_dir = make_output_dir(args.out_dir)
-    with LowLevelClient(port, baud=args.baud) as client:
+    with LowLevelClient(port=port, baud=args.baud) as client:
         if not client.wait_until_ready():
             print(_red("Arduino did not respond.")); sys.exit(2)
         record_motor_sweep(client, out_dir)

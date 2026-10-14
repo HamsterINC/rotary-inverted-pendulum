@@ -38,7 +38,11 @@ from pathlib import Path
 
 import numpy as np
 
-from lowlevel_client import LowLevelClient
+FPGA = True
+if FPGA: 
+    from FPGA_lowlevel_client import FpgaLowLevelClient as LowLevelClient
+else:
+    from lowlevel_client import LowLevelClient
 
 
 SAFETY_POS_RAD = 1.5  # ~86° — abort if motor crosses this
@@ -204,7 +208,7 @@ def plot_trials(trials: list[dict], fits: list[dict], out_path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--port", required=True, help="Arduino serial port")
+    p.add_argument("--port", required=False, help="Arduino serial port")
     p.add_argument("--accels", type=float, nargs="+", default=[10.0, 20.0, 30.0, 50.0],
                    help="Accel values to test (rad/s²)")
     p.add_argument("--out-dir", type=str, default=None,
@@ -222,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     trials: list[dict] = []
     fits: list[dict] = []
 
-    with LowLevelClient(args.port) as client:
+    with LowLevelClient(port=args.port) as client:
         if not client.wait_until_ready():
             print("Arduino not responding", file=sys.stderr)
             return 1

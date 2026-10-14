@@ -53,6 +53,7 @@ DEFAULT_FREE_SWING_RUNS: int = 3
 # Free-swing fit
 # ---------------------------------------------------------------------------
 
+
 def fit_free_swing(time_s: np.ndarray, pendulum_rad: np.ndarray) -> dict:
     """Fit damped-oscillator parameters to free-swing data.
 
@@ -68,7 +69,7 @@ def fit_free_swing(time_s: np.ndarray, pendulum_rad: np.ndarray) -> dict:
     computed for diagnostic comparison.
     """
     n = len(pendulum_rad)
-    rest = float(np.mean(pendulum_rad[3 * n // 4:]))
+    rest = float(np.mean(pendulum_rad[4 * n // 5:]))
     p = pendulum_rad - rest
 
     abs_max = float(np.max(np.abs(p)))
@@ -209,7 +210,7 @@ def derive_pendulum_friction(fit: dict, *, gravity: float = GRAVITY) -> dict:
     inertia_measured = (
         PENDULUM_MASS_KG * gravity * PENDULUM_COM_M / (omega_n_small ** 2)
     )
-    viscous = 2.0 * decay * inertia_predicted
+    viscous = 2.0 * decay * inertia_measured
 
     delta_c = float(fit.get("delta_c_per_half_cycle_rad", 0.0))
     coulomb = delta_c * PENDULUM_MASS_KG * gravity * PENDULUM_COM_M / 2.0

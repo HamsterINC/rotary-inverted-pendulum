@@ -227,7 +227,7 @@ def build_mjcf(p: PendulumParams) -> str:
     """
     m = p.pendulum_mass_kg
     d = p.pendulum_com_m
-    I_com_swing = PENDULUM_I_COM_SWING_KG_M2
+    I_com_swing = PENDULUM_I_COM_SWING_KG_M2 * 1.066
     # diaginertia[0] = ixx = swing-axis inertia about COM (THE one that matters)
     # diaginertia[1] = iyy ≈ ixx for a rod-like body with extent perpendicular to its length axis
     # diaginertia[2] = izz ≈ tiny (length-axis inertia)

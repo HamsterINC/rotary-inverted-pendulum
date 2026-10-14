@@ -140,7 +140,7 @@
   </link>
   <!-- Joint from composite_part_2 to pendulum -->
   <joint name="arm_to_pendulum" type="revolute">
-    <origin xyz="0.06 -0 0.002" rpy="1.5708 -0.00389442 1.5708"/>
+    <origin xyz="0.063 -0 0.002" rpy="1.5708 -0.00389442 1.5708"/>
     <parent link="composite_part_2"/>
     <child link="pendulum"/>
     <axis xyz="0 0 1"/>

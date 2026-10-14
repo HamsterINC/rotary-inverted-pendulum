@@ -37,7 +37,7 @@ import numpy as np
 
 FPGA = True
 if FPGA: 
-    from FPGA_lowlevel_client import LowLevelClient
+    from FPGA_lowlevel_client import FpgaLowLevelClient as LowLevelClient
 else:
     from lowlevel_client import LowLevelClient
 
@@ -262,7 +262,7 @@ def plot_trials(trials: list[dict], fits: list[dict], out_path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--port", required=True, help="Arduino serial port")
+    p.add_argument("--port", required=False, help="Arduino serial port")
     p.add_argument("--baseline-accel", type=float, default=20.0,
                    help="Pre-accel value (rad/s²). Default 20.")
     p.add_argument("--baseline-duration", type=float, default=0.15,
@@ -293,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
 
     trials = []
     fits = []
-    with LowLevelClient(args.port) as client:
+    with LowLevelClient(port=args.port) as client:
         if not client.wait_until_ready():
             print("Arduino not responding", file=sys.stderr)
             return 1

@@ -42,6 +42,10 @@ def _to_int16(val: int) -> int:
     val &= 0xFFFF
     return val - 0x10000 if val & 0x8000 else val
 
+def _to_int32(val: int) -> int:
+    """Interpret an unsigned 32-bit register readout as signed."""
+    val &= 0xFFFFFFFF
+    return val - 0x100000000 if val & 0x80000000 else val
 
 def _to_uint16(val: int) -> int:
     """Pack a signed 16-bit integer into an unsigned 16-bit word."""
@@ -59,6 +63,7 @@ def float_to_q16(val_float: float, frac_bits: int) -> int:
 
 class LowLevelState(NamedTuple):
     """Decoded state (rad, rad/s)."""
+    time_us: int
     motor_pos_rad: float
     pendulum_pos_rad: float
     motor_vel_rad_s: float
@@ -70,7 +75,7 @@ class FpgaLowLevelClient:
 
     def __init__(
         self,
-        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/RotaryInvertedPendulum-FPGA/Training_pipeline.xsa",
+        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/RotaryInvertedPendulum-FPGA/lowlevel_client.xsa",
         download: bool = True,
         pos_frac_bits: int = 12,     # Q3.12 rad
         vel_frac_bits: int = 7,      # Q9.7  rad/s
@@ -80,6 +85,7 @@ class FpgaLowLevelClient:
         port: str | None = None,     # compatibility shim
         baud: int | None = None,     # compatibility shim
     ):
+        self.clock_frequency = 1e8
         self.pos_frac_bits = pos_frac_bits
         self.vel_frac_bits = vel_frac_bits
         self.accel_frac_bits = accel_frac_bits
@@ -97,6 +103,7 @@ class FpgaLowLevelClient:
             gpio_step_addr = self.ol.ip_dict["axi_gpio_step"]["phys_addr"]
             gpio_pen_addr  = self.ol.ip_dict["axi_gpio_pen"]["phys_addr"]
             gpio_ctrl_addr = self.ol.ip_dict["axi_gpio_ctrl"]["phys_addr"]
+            gpio_timing_addr = self.ol.ip_dict["axi_gpio_timing"]["phys_addr"]
         except KeyError as err:
             available = list(self.ol.ip_dict.keys())
             raise KeyError(
@@ -106,6 +113,7 @@ class FpgaLowLevelClient:
         self.gpio_step = MMIO(gpio_step_addr, 0x1000)
         self.gpio_pen  = MMIO(gpio_pen_addr,  0x1000)
         self.gpio_ctrl = MMIO(gpio_ctrl_addr, 0x1000)
+        self.gpio_timing = MMIO(gpio_timing_addr, 0x1000)
 
         # RLock so public methods can call each other while holding the lock.
         self._lock = threading.RLock()
@@ -120,22 +128,25 @@ class FpgaLowLevelClient:
     # HAL
     # ------------------------------------------------------------------
 
-    def _hal_read_raw(self) -> tuple[int, int, int, int]:
+    def _hal_read_raw(self) -> tuple[int, int, int, int, int]:
         """Return signed raw (mp, pp, mv, pv) register values."""
         mp = _to_int16(self.gpio_step.read(GPIO_CH1_DATA_OFFSET))
         mv = _to_int16(self.gpio_step.read(GPIO_CH2_DATA_OFFSET))
         pp = _to_int16(self.gpio_pen.read(GPIO_CH1_DATA_OFFSET))
         pv = _to_int16(self.gpio_pen.read(GPIO_CH2_DATA_OFFSET))
-        return mp, pp, mv, pv
+        t  = _to_int32(self.gpio_timing.read(GPIO_CH1_DATA_OFFSET))
+        return mp, pp, mv, pv, t
 
     def _hal_read_state(self) -> LowLevelState:
-        mp, pp, mv, pv = self._hal_read_raw()
+        mp, pp, mv, pv, t = self._hal_read_raw()
         s = -1.0 if self.flip_sign else 1.0
         return LowLevelState(
+            time_us=t,
             motor_pos_rad=s * q16_to_float(mp, self.pos_frac_bits),
             pendulum_pos_rad=s * q16_to_float(pp, self.pos_frac_bits),
             motor_vel_rad_s=s * q16_to_float(mv, self.vel_frac_bits),
             pendulum_vel_rad_s=s * q16_to_float(pv, self.vel_frac_bits),
+
         )
 
     def _hal_write_accel_raw(self, accel_q: int) -> None:
@@ -166,7 +177,7 @@ class FpgaLowLevelClient:
             a = max(-ACCEL_FULL_SCALE, min(ACCEL_FULL_SCALE, a))
 
             # Rail brake on raw-frame motor position (before the sign flip).
-            mp_raw, _, _, _ = self._hal_read_raw()
+            mp_raw, _, _, _, _ = self._hal_read_raw()
             mp_rad = q16_to_float(mp_raw, self.pos_frac_bits)
             if mp_rad >= SAFE_LIMIT_RAD:
                 a = -BRAKE_ACCEL

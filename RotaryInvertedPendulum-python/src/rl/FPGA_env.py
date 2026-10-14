@@ -225,7 +225,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
     def _read_raw_state(self):
         s = self._client.get_state()  # type: ignore[union-attr]
         # Un-flip server's sign convention to put us in sim frame.
-        return (-s.motor_pos_rad, -s.pendulum_pos_rad,
+        return (s.time_us, -s.motor_pos_rad, -s.pendulum_pos_rad,
                 -s.motor_vel_rad_s, -s.pendulum_vel_rad_s)
 
     def _wait_for_pendulum_rest(self, client: FpgaLowLevelClient) -> bool:
