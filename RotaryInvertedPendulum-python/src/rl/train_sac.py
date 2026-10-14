@@ -143,7 +143,7 @@ def train(args: argparse.Namespace) -> Path:
             gamma=0.995,
             train_freq=1,
             gradient_steps=1,
-            # policy_kwargs=policy_kwargs,
+            policy_kwargs=policy_kwargs,
             ent_coef="auto",
             verbose=1,
             tensorboard_log=str(run_dir / "tb"),
