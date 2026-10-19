@@ -55,7 +55,47 @@ DEFAULT_PARAMS_PATH = HERE / "sysid_params.json"
 MOTOR_LIMIT_RAD = math.radians(145.0)
 MOTOR_SAFE_LIMIT_RAD = math.radians(145.0)
 
-NORMILIZED_OBS = False  # If True, observation is normalized to [-1, 1] range per dimension
+NORMILIZED_OBS = True  # If True, observation is normalized to [-1, 1] range per dimension
+
+
+# Observation-normalization presets. Each feature maps to (kind, *params);
+# missing features pass through raw. "gain" multiplies every feature last.
+OBS_NORM_PRESETS = {
+    "raw": {},
+    "orig": {"feats": {"motor_pos": ("clipdiv", MOTOR_LIMIT_RAD),
+                       "motor_vel": ("clipdiv", 7.5),
+                       "pen_vel":   ("clipdiv", 32.0)}},
+    "only_mp":   {"feats": {"motor_pos": ("clipdiv", MOTOR_LIMIT_RAD)}},
+    "only_mv":   {"feats": {"motor_vel": ("clipdiv", 7.5)}},
+    "only_pv32": {"feats": {"pen_vel": ("clipdiv", 32.0)}},
+    "only_pv8":  {"feats": {"pen_vel": ("clipdiv", 8.0)}},
+    "only_pv4":  {"feats": {"pen_vel": ("div", 4.0)}},
+    "only_pv_asinh1":  {"feats": {"pen_vel": ("asinh", 1.0, 32.0)}},
+    "only_pv_asinh10": {"feats": {"pen_vel": ("asinh", 10.0, 32.0)}},
+    "raw_x0.1": {"gain": 0.1},
+    "raw_x0.3": {"gain": 0.3},
+    "raw_x3":   {"gain": 3.0},
+    "orig_sin10": {"feats": {"motor_pos": ("clipdiv", MOTOR_LIMIT_RAD),
+                             "motor_vel": ("clipdiv", 7.5),
+                             "pen_vel":   ("clipdiv", 32.0),
+                             "sin":       ("gain", 10.0)}},
+}
+
+
+def _apply_norm(spec, x: float) -> float:
+    if spec is None:
+        return x
+    kind = spec[0]
+    if kind == "div":
+        return x / spec[1]
+    if kind == "clipdiv":
+        return float(np.clip(x / spec[1], -1.0, 1.0))
+    if kind == "gain":
+        return x * spec[1]
+    if kind == "asinh":
+        s, xm = spec[1], spec[2]
+        return float(np.clip(np.arcsinh(x / s) / np.arcsinh(xm / s), -1.0, 1.0))
+    raise ValueError(f"unknown norm kind {kind}")
 
 # Arm geometry, measured 2026-05-02 against the OnShape CAD + a kitchen
 # scale. The arm is 65 mm from the stepper shaft to the pendulum joint
@@ -146,7 +186,10 @@ DR_OBS_NOISE_STD_POS_RAD = 0.005
 # physics, the reward, and the eval env are unchanged). 0.05 rad ≈ 2.9°
 # brackets the measured rest band with headroom.
 DR_THETA_BIAS_MAX_RAD = 0.05
-DR_OBS_NOISE_STD_VEL_RAD_S = 0.005
+# if NORMILIZED_OBS:
+#     DR_OBS_NOISE_STD_VEL_RAD_S = 0.005
+# else :
+DR_OBS_NOISE_STD_VEL_RAD_S = 0.05
 DR_CONTROL_DT_JITTER_FRAC = 0.05        # ±5% jitter on physics steps per control.
                                          # Empirically valuable: the legacy
                                          # variable-rate fine-tune (rate
@@ -385,8 +428,14 @@ class RotaryInvertedPendulumEnv(gym.Env):
         dr_action_lag_tau_range_s: tuple[float, float] | None = None,
         dr_control_dt_jitter_frac: float | None = None,
         dr_theta_bias_max_rad: float | None = None,  # None → DR_THETA_BIAS_MAX_RAD
+        obs_norm: str = "raw",
     ):
         super().__init__()
+        if obs_norm not in OBS_NORM_PRESETS:
+            raise ValueError(f"obs_norm must be one of {list(OBS_NORM_PRESETS)}")
+        self.obs_norm_name = obs_norm
+        self._obs_norm = OBS_NORM_PRESETS[obs_norm]
+
         self.params = PendulumParams.load(params_path)
         self.control_freq_hz = control_freq_hz
         self.max_accel_rad_s2 = max_accel_rad_s2
@@ -519,19 +568,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # — gives the policy an implicit read on its own command pipeline,
         # which restores Markov property under action delay (POMDP→MDP).
 
-        if NORMILIZED_OBS:
-            self.observation_space = spaces.Box(
-                low=-1.0, high=1.0, shape=(6,), dtype=np.float32
-            )
-        else:
-            # Observation is now 5-dim: [motor_pos, theta_norm, motor_vel, pen_vel, prev_action]
-            obs_high = np.array(
-                [MOTOR_SAFE_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
-            )
-            # obs_high = np.array(
-            #             [MOTOR_LIMIT_RAD, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
-            #         )
-            self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(6,), dtype=np.float32)
 
         self._viewer = None
 
@@ -835,30 +872,30 @@ class RotaryInvertedPendulumEnv(gym.Env):
         cos_theta = math.cos(theta)
         sin_theta = math.sin(theta)
 
-        if NORMILIZED_OBS:
-            # --- Normalize linear / unbounded dims to [-1.0, 1.0] ---
-            motor_pos = np.clip(motor_pos / MOTOR_LIMIT_RAD, -1.0, 1.0)
-            motor_vel = np.clip(motor_vel / (self.max_velocity_rad_s * 1.5), -1.0, 1.0) #Leaving extra room for error.
-            pen_vel = np.clip(pen_vel / MAX_PENDULUM_VEL_RAD_S, -1.0, 1.0)
-            prev_act  = np.clip(self._prev_action, -1.0, 1.0)
-        else:
-            motor_pos = motor_pos 
-            motor_vel = motor_vel
-            pen_vel   = pen_vel
-            prev_act = np.clip(self._prev_action, -1.0, 1.0)
+        vals = {
+                    "motor_pos": motor_pos, "cos": cos_theta, "sin": sin_theta,
+                    "motor_vel": motor_vel, "pen_vel": pen_vel,
+                    "prev_act": float(np.clip(self._prev_action, -1.0, 1.0)),
+                }
+        feats = self._obs_norm.get("feats", {})
+        g = self._obs_norm.get("gain", 1.0)
+        return np.array(
+            [_apply_norm(feats.get(k), v) * g for k, v in vals.items()],
+                dtype=np.float32,
+        )
             
         # print(f"theta: {theta}, pen_vel_norm: {pen_vel_norm}")
-        return np.array(
-            [
-                motor_pos,
-                cos_theta,
-                sin_theta,
-                motor_vel,
-                pen_vel,
-                prev_act,
-            ],
-            dtype=np.float32,
-        )
+        # return np.array(
+        #     [
+        #         motor_pos,
+        #         cos_theta,
+        #         sin_theta,
+        #         motor_vel,
+        #         pen_vel,
+        #         prev_act,
+        #     ],
+        #     dtype=np.float32,
+        # )
 
     def _reward(self, action: float) -> float:
         # Standard quadratic-cost reward (Quanser QUBE-Servo / Furuta-pendulum
