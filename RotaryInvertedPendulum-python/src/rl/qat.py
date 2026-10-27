@@ -168,7 +168,8 @@ class ActQuant(nn.Module):
         return 0, 2 ** self.bits - 1
 
     def current_scale(self) -> th.Tensor:
-        return _scale_from_max(self.running_max, self._qrange()[1], self.pow2)
+        # .clone(): never hand autograd a tensor that a later forward will mutate in place
+        return _scale_from_max(self.running_max.detach().clone(), self._qrange()[1], self.pow2)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         if self.training:
@@ -185,7 +186,12 @@ class ActQuant(nn.Module):
             return x
         qmin, qmax = self._qrange()
         q = _ste_quant(x, self.current_scale(), qmin, qmax)
-        return th.where(self.initialized, q, x)  # pass-through until calibrated
+        # th.where saves its condition for backward. SB3's SAC runs the actor several
+        # times per gradient step (obs, then next_obs under no_grad) BEFORE backward, and
+        # each training-mode forward updates the observer buffers in place. Using the
+        # buffer directly raises "modified by an inplace operation"; a clone is safe.
+        ready = self.initialized.detach().clone()
+        return th.where(ready, q, x)  # pass-through until calibrated
 
 
 class QuantLinear(nn.Linear):

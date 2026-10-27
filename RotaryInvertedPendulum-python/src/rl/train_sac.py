@@ -378,7 +378,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="run dir name under runs/. Default: timestamp.")
     p.add_argument("--resume", default=None, help="path to a .zip to resume from")
     p.add_argument("--progress-bar", action="store_true")
-    p.add_argument("--obs-norm", default=None, choices=list(OBS_NORM_PRESETS),
+    p.add_argument("--obs-norm", default="orig", choices=list(OBS_NORM_PRESETS),
                    help="Observation normalization preset (see OBS_NORM_PRESETS in "
                         "pendulum_env). Default: 'raw' for a fresh training run. "
                         "For --eval and --resume the preset is read from the run's "

@@ -29,6 +29,7 @@ Examples
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 import time
@@ -130,8 +131,34 @@ def build_qcfg(qargs) -> QATConfig | None:
 # Environments
 # --------------------------------------------------------------------------
 
+# make_env parameters that callers below set explicitly (train vs eval differ), so
+# they must never be auto-forwarded from args.
+_EXPLICIT_ENV_PARAMS = {
+    "monitor_dir", "domain_randomization", "dr_motor_accel_range_rad_s2",
+    "dr_action_delay_steps_range", "dr_action_lag_tau_range_s",
+    "dr_control_dt_jitter_frac", "dr_theta_bias_max_rad",
+}
+
+
+def _forwarded_extras(args) -> dict:
+    """Any other make_env parameter that has a same-named parsed argument is forwarded
+    automatically, so options you add to train_sac.py (e.g. --obs-norm -> obs_norm) reach
+    the env without editing this file. Requires: make_env(..., obs_norm=...) and the
+    argparse dest obs_norm."""
+    known = {"control_freq_hz", "max_accel_rad_s2", "reward_action_rate_weight",
+             "reward_motor_vel_weight", "reward_motor_jerk_weight",
+             "reward_stillness_bonus_weight", "max_velocity_rad_s"}
+    extras = {}
+    for name in inspect.signature(train_sac.make_env).parameters:
+        if name in known or name in _EXPLICIT_ENV_PARAMS:
+            continue
+        if hasattr(args, name):
+            extras[name] = getattr(args, name)
+    return extras
+
+
 def _common_env_kwargs(args) -> dict:
-    return dict(
+    kw = dict(
         control_freq_hz=args.control_freq,
         max_accel_rad_s2=args.max_accel_rad_s2,
         reward_action_rate_weight=args.reward_action_rate_weight,
@@ -140,6 +167,8 @@ def _common_env_kwargs(args) -> dict:
         reward_stillness_bonus_weight=args.reward_stillness_bonus_weight,
         max_velocity_rad_s=args.max_velocity_rad_s,
     )
+    kw.update(_forwarded_extras(args))
+    return kw
 
 
 def make_qenv(base_thunk, quantizer):
@@ -164,6 +193,9 @@ def train_qat(args, qargs) -> Path:
 
     quantizer = build_quantizer(qargs)
     qcfg = build_qcfg(qargs)
+    extras = _forwarded_extras(args)
+    if extras:
+        print(f"Extra env kwargs forwarded to make_env: {extras}")
     if quantizer is not None:
         print(f"Obs formats: {quantizer.describe()}  (word bits {quantizer.word_bits.tolist()})")
     if qcfg is not None:
@@ -189,6 +221,9 @@ def train_qat(args, qargs) -> Path:
         dr_theta_bias_max_rad=0.0,
         **_common_env_kwargs(args),
     ), quantizer)])
+    # Seed the eval env too: SB3 only seeds the training env, so without this the
+    # eval episodes (and therefore best_model.zip selection) differ run to run.
+    eval_env.seed(args.seed + 10_000)
 
     if args.resume:
         print(f"Resuming from {args.resume}")
@@ -201,7 +236,7 @@ def train_qat(args, qargs) -> Path:
             QATSACPolicy if qcfg is not None else "MlpPolicy",
             train_env,
             learning_rate=3e-4,
-            buffer_size=200_000,
+            buffer_size=400_000,
             batch_size=256,
             tau=0.005,
             gamma=0.995,
