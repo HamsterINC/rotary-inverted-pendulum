@@ -1,0 +1,103 @@
+{
+  "motor_step": {
+    "fit": {
+      "effective_delay_s_estimate": 0.06796800000000758,
+      "rise_time_95_s": 0.06796800000000758,
+      "steady_state_error_rad": -0.0015487074851989746,
+      "step_amplitude_rad": 0.30000001192092896,
+      "step_edge_time_s": 0.0
+    },
+    "source_file": "step_amp_0.30.npz"
+  },
+  "pendulum": {
+    "derived": {
+      "coulomb_friction_N_m": 1.4779840468224504e-05,
+      "inertia_measured_kg_m2": 2.7494134971799407e-05,
+      "inertia_predicted_kg_m2": 2.7075645139059407e-05,
+      "viscous_friction_N_m_s": 3.6842077985253658e-06
+    },
+    "fit": {
+      "decay_constant_s_inv": 0.0788205885177137,
+      "decay_constant_s_inv_all_runs": [
+        0.06857268714019048,
+        0.08906553653176308,
+        0.0788205885177137
+      ],
+      "decay_constant_s_inv_stdev": 0.00836617075980333,
+      "decay_constant_visc_only_s_inv": 0.11159586875801182,
+      "delta_c_per_half_cycle_rad": 0.006965125245977056,
+      "delta_c_per_half_cycle_rad_all_runs": [
+        0.007413862644898055,
+        0.004901799014670894,
+        0.006965125245977056
+      ],
+      "delta_c_per_half_cycle_rad_stdev": 0.0010938791357314136,
+      "envelope_rmse_combined_rad": 0.010387220721161683,
+      "envelope_rmse_visc_only_rad": 0.040278221561074495,
+      "initial_amplitude_rad": 1.2608749063986922,
+      "mean_pair_amplitude_rad": 0.751853298611111,
+      "median_run_index": 0,
+      "n_extrema_used": 38,
+      "n_runs": 3,
+      "omega_d_rad_s": 11.942696465600056,
+      "omega_d_rad_s_all_runs": [
+        11.942696465600056,
+        11.904982687287637,
+        11.993354775104196
+      ],
+      "omega_d_rad_s_stdev": 0.03620653609114297,
+      "omega_n_rad_s": 11.942893329628198,
+      "omega_n_rad_s_all_runs": [
+        11.942893329628198,
+        11.905315848578569,
+        11.993613777618858
+      ],
+      "omega_n_rad_s_stdev": 0.03618034334216483,
+      "omega_n_small_amp_rad_s": 12.424112512960013,
+      "omega_n_small_amp_rad_s_all_runs": [
+        12.424112512960013,
+        12.40892258635043,
+        12.435361681033523
+      ],
+      "omega_n_small_amp_rad_s_stdev": 0.010833607075578244,
+      "period_s": 0.5261111111111112,
+      "period_s_all_runs": [
+        0.5261111111111112,
+        0.5277777777777778,
+        0.5238888888888888
+      ],
+      "period_s_stdev": 0.001593023197600512,
+      "r_per_half_cycle": 0.9795650667488202,
+      "r_per_half_cycle_all_runs": [
+        0.9821232922575409,
+        0.9767706482964655,
+        0.9795650667488202
+      ],
+      "r_per_half_cycle_stdev": 0.0021859167823533514,
+      "rest_angle_rad": 0.005498046875,
+      "small_amp_period_s": 0.5057250810168841,
+      "small_amp_period_s_all_runs": [
+        0.5057250810168841,
+        0.5063441457915908,
+        0.5052675964192286
+      ],
+      "small_amp_period_s_stdev": 0.0004411464739753854,
+      "zeta": 0.00657187983364946,
+      "zeta_all_runs": [
+        0.0057417147794558135,
+        0.007481156960854342,
+        0.00657187983364946
+      ],
+      "zeta_stdev": 0.0007103690757229087
+    }
+  },
+  "run_meta": {
+    "collected_at": "2026-10-13T14:19:50",
+    "firmware": "LowLevelServer.ino",
+    "fitted_at": "2026-10-14T07:56:02",
+    "hanging_zero_rad": 0.0,
+    "in_dir": "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/RotaryInvertedPendulum-python/src/rl/sysid_runs/2026-10-13_141940",
+    "n_free_swing_runs": 3,
+    "wizard_version": "2026-05-20"
+  }
+}

@@ -220,6 +220,7 @@ cython_debug/
 #.idea/
 
 # RL training artifacts
+policy/runs
 RotaryInvertedPendulum-python/src/rl/runs
 RotaryInvertedPendulum-python/src/rl/Output
 
