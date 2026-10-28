@@ -21,6 +21,7 @@ const long BAUD_RATE = 1000000;
 #define MISO_PIN 19
 #define MOSI_PIN 23
 #define CS_PIN   5
+#define CS_PIN_2   15
 
 // ESP32 Safe Stepper Pins. 
 // FastAccelStepper on ESP32 uses MCPWM/RMT, so it is NOT restricted to specific pins.
@@ -44,8 +45,10 @@ const uint16_t SAMPLE_PERIOD_US = 2000;
 const uint8_t  BUFFER_SIZE      = 16;
 const uint8_t  VEL_WINDOW       = 5;
 const long PEN_RAW_MAX_DELTA_LSB = 500;
+const long ARM_RAW_MAX_DELTA_LSB = 500;
 
 static int32_t motor_step_buf[BUFFER_SIZE];   // raw stepper position (steps)
+static float   arm_rad_buf[BUFFER_SIZE];      // accumulated pendulum angle (rad)
 static float   pen_rad_buf[BUFFER_SIZE];      // accumulated pendulum angle (rad)
 static uint32_t time_us_buf[BUFFER_SIZE];     // sample timestamps (µs)
 static uint8_t  buf_head = 0;                 // next write index
@@ -56,10 +59,15 @@ static uint32_t last_sample_us = 0;
 static long    pen_raw_prev   = -1;           // -1 = first read sentinel
 static float   pen_position_rad = 0.0f;
 
+// Continuously-tracked pendulum angle
+static long    arm_raw_prev   = -1;           // -1 = first read sentinel
+static float   arm_position_rad = 0.0f;
+
 // State variables
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 FastAccelStepper *stepper = NULL;
-AS5047P AS5047P(CS_PIN); // Initialize with ESP32 CS pin
+AS5047P PendulumAngle(CS_PIN); // Initialize with ESP32 CS pin
+AS5047P ArmAngle(CS_PIN_2); // Initialize with ESP32 CS pin
 
 bool motor_engaged = false;
 
@@ -69,7 +77,8 @@ void sendState();
 void sampleState();
 void computeVelocities(float* motor_vel_rad_s, float* pen_vel_rad_s);
 
-long ZERO_OFFSET_RAW = 0;
+long ZERO_OFFSET_PENDULUM_RAW = 0;
+long ZERO_OFFSET_ARM_RAW = 0;
 
 void setup()
 {
@@ -81,20 +90,27 @@ void setup()
     Serial.println("\n--- ESP32 Booting ---");
     
     // Explicitly initialize SPI for ESP32 before starting the sensor
-    SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CS_PIN);
+    SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN);
     
-    if (!AS5047P.initSPI()) {
-      Serial.println("AS5047P init failed!");
+    if (!PendulumAngle.initSPI()) {
+      Serial.println("PendulumAngle init failed!");
+      while (1);
+    } 
+    if (!ArmAngle.initSPI()) {
+      Serial.println("ArmAngle init failed!");
       while (1);
     } 
 
     delay(100); // Give the sensor a moment to stabilize
 
     // 1. Read the current position at startup and set it as the zero point
-    ZERO_OFFSET_RAW = AS5047P.readAngleRaw();
+    ZERO_OFFSET_PENDULUM_RAW = PendulumAngle.readAngleRaw();
+    ZERO_OFFSET_ARM_RAW = ArmAngle.readAngleRaw();
   
     Serial.print("Physical zero offset captured at: ");
-    Serial.println(ZERO_OFFSET_RAW); 
+    Serial.println(ZERO_OFFSET_PENDULUM_RAW); 
+    Serial.print("Physical zero offset captured at: ");
+    Serial.println(ZERO_OFFSET_ARM_RAW); 
 
     engine.init();
     stepper = engine.stepperConnectToPin(STEP_PIN);
@@ -118,13 +134,20 @@ void setup()
 
     while (!Serial) { ; }
     
-    AS5047P_Types::DIAAGC_t diagnostics = AS5047P.read_DIAAGC(nullptr, true);
+    AS5047P_Types::DIAAGC_t diagnosticsPendulum = PendulumAngle.read_DIAAGC(nullptr, true);
+    AS5047P_Types::DIAAGC_t diagnosticsARM = ArmAngle.read_DIAAGC(nullptr, true);
     
-    while (diagnostics.data.values.MAGL == 1) {
+    while (diagnosticsPendulum.data.values.MAGL == 1) {
       Serial.println("Magnet not detected or too far away! Please adjust.");
       delay(500);
-      diagnostics = AS5047P.read_DIAAGC(nullptr, true); 
+      diagnosticsPendulum = PendulumAngle.read_DIAAGC(nullptr, true); 
     }
+    while (diagnosticsARM.data.values.MAGL == 1) {
+      Serial.println("Magnet not detected or too far away! Please adjust.");
+      delay(500);
+      diagnosticsARM = ArmAngle.read_DIAAGC(nullptr, true); 
+    }
+
 
     last_sample_us = micros();
 }
@@ -146,47 +169,68 @@ void loop()
 void sampleState()
 {
     int32_t motor_step = stepper->getCurrentPosition();
-    long raw = AS5047P.readAngleRaw(); 
+    long raw_pen = PendulumAngle.readAngleRaw(); 
+    long raw_arm = ArmAngle.readAngleRaw(); 
     
     if (pen_raw_prev < 0)
     {
-        pen_raw_prev = raw;
-        long initial_raw = raw;
-        if (initial_raw < 0) initial_raw += 16384;
-        pen_position_rad = (float)initial_raw * (TWO_PI / 16384.0f);
+        pen_raw_prev = raw_pen;
+        arm_raw_prev = raw_arm;
+        long initial_rawpen = raw_pen;
+        if (initial_rawpen < 0) initial_rawpen += 16384;
+        pen_position_rad = (float)initial_rawpen * (TWO_PI / 16384.0f);
+
+        long initial_rawarm = raw_arm;
+        if (initial_rawarm < 0) initial_rawarm += 16384;
+        pen_position_rad = (float)initial_rawarm * (TWO_PI / 16384.0f);
     }
     else
     {
-        long delta = raw - pen_raw_prev;
+        long delta_pen = raw_pen - pen_raw_prev;
+        long delta_arm = raw_arm - arm_raw_prev;
         
         // AS5047P 14-bit wraparound handling
-        if (delta >  8192) delta -= 16384;
-        if (delta < -8192) delta += 16384;
+        if (delta_pen >  8192) delta_pen -= 16384;
+        if (delta_pen < -8192) delta_pen += 16384;
         
-        if (delta > PEN_RAW_MAX_DELTA_LSB || delta < -PEN_RAW_MAX_DELTA_LSB)
+        if (delta_pen > PEN_RAW_MAX_DELTA_LSB || delta_pen < -PEN_RAW_MAX_DELTA_LSB)
         {
             // Glitch detected: Do nothing
         }
         else
         {
-            pen_position_rad += (float)delta * (TWO_PI / 16384.0f);
-            pen_raw_prev = raw;
+            pen_position_rad += (float)delta_pen * (TWO_PI / 16384.0f);
+            pen_raw_prev = raw_pen;
+        }
+
+        if (delta_arm >  8192) delta_arm -= 16384;
+        if (delta_arm < -8192) delta_arm += 16384;
+        
+        if (delta_arm > ARM_RAW_MAX_DELTA_LSB || delta_arm < -ARM_RAW_MAX_DELTA_LSB)
+        {
+            // Glitch detected: Do nothing
+        }
+        else
+        {
+            arm_position_rad += (float)delta_arm * (TWO_PI / 16384.0f);
+            arm_raw_prev = raw_arm;
         }
     }
 
     motor_step_buf[buf_head] = motor_step;
+    arm_rad_buf[buf_head]    = arm_position_rad;
     pen_rad_buf[buf_head]    = pen_position_rad;
     time_us_buf[buf_head]    = last_sample_us;
     buf_head = (buf_head + 1) % BUFFER_SIZE;
     if (buf_head == 0) buf_filled = true;
 }
 
-void computeVelocities(float* motor_vel_rad_s, float* pen_vel_rad_s)
+void computeVelocities(float* arm_vel_rad_s, float* pen_vel_rad_s)
 {
     uint8_t n_samples = buf_filled ? BUFFER_SIZE : buf_head;
     if (n_samples < VEL_WINDOW)
     {
-        *motor_vel_rad_s = 0.0f;
+        *arm_vel_rad_s = 0.0f;
         *pen_vel_rad_s   = 0.0f;
         return;
     }
@@ -200,13 +244,13 @@ void computeVelocities(float* motor_vel_rad_s, float* pen_vel_rad_s)
     
     if (dt_s <= 0.0f)
     {
-        *motor_vel_rad_s = 0.0f;
+        *arm_vel_rad_s = 0.0f;
         *pen_vel_rad_s   = 0.0f;
         return;
     }
 
-    int32_t motor_step_delta = motor_step_buf[newest] - motor_step_buf[oldest];
-    *motor_vel_rad_s = ((float)motor_step_delta * ((2.0f * PI) / 3200.0f)) / dt_s;
+    float arm_delta = arm_rad_buf[newest] - arm_rad_buf[oldest];
+    *arm_vel_rad_s = arm_delta / dt_s;
 
     float pen_delta = pen_rad_buf[newest] - pen_rad_buf[oldest];
     *pen_vel_rad_s = pen_delta / dt_s;
@@ -288,20 +332,20 @@ void sendState()
 {
     uint8_t newest = (uint8_t)((buf_head + BUFFER_SIZE - 1) % BUFFER_SIZE);
     uint32_t current_time = time_us_buf[newest];
-    float motor_position_radians = stepsToRadians(motor_step_buf[newest]);
+    float arm_position_radians = arm_rad_buf[newest];
     float pendulum_position_radians = pen_rad_buf[newest];
 
-    float motor_velocity_rad_s, pendulum_velocity_rad_s;
-    computeVelocities(&motor_velocity_rad_s, &pendulum_velocity_rad_s);
+    float arm_velocity_rad_s, pendulum_velocity_rad_s;
+    computeVelocities(&arm_velocity_rad_s, &pendulum_velocity_rad_s);
 
-    motor_position_radians    *= -1;
+    arm_position_radians    *= -1;
     pendulum_position_radians *= -1;
-    motor_velocity_rad_s      *= -1;
+    arm_velocity_rad_s      *= -1;
     pendulum_velocity_rad_s   *= -1;
 
     Serial.write((byte *)&current_time, sizeof(current_time));
-    Serial.write((byte *)&motor_position_radians, sizeof(motor_position_radians));
+    Serial.write((byte *)&arm_position_radians, sizeof(arm_position_radians));
     Serial.write((byte *)&pendulum_position_radians, sizeof(pendulum_position_radians));
-    Serial.write((byte *)&motor_velocity_rad_s, sizeof(motor_velocity_rad_s));
+    Serial.write((byte *)&arm_velocity_rad_s, sizeof(arm_velocity_rad_s));
     Serial.write((byte *)&pendulum_velocity_rad_s, sizeof(pendulum_velocity_rad_s));
 }
