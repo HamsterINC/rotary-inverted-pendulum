@@ -31,23 +31,23 @@ def float_to_q_format(val, int_bits, frac_bits, total_bits=16):
     return f"{clamped_val:0{hex_len}x}"
 
 def main():
-    # zip_path = "runs/async_FPGA/last.zip"
+    zip_path = "Saved_runs/SMALLNETWORKFPGA_stage3/best_model.zip"
 
-    # with zipfile.ZipFile(zip_path, 'r') as archive:
-    #     with archive.open('policy.pth') as f:
-    #         checkpoint = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=True)
-    with open('runs/async_FPGA/distill_h128/student.pt', 'rb') as f:
-        checkpoint = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=True)
-    print(checkpoint['state_dict'].keys())
+    with zipfile.ZipFile(zip_path, 'r') as archive:
+        with archive.open('policy.pth') as f:
+            checkpoint = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=True)
+    # with open('runs/async_FPGA/distill_h128/student.pt', 'rb') as f:
+    #     checkpoint = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=True)
+    print(checkpoint.keys())
     # Extract weight matrices & biases
-    w1 = checkpoint['state_dict']['fc1.weight'].detach().numpy()
-    b1 = checkpoint['state_dict']['fc1.bias'].detach().numpy()
+    w1 = checkpoint['actor.latent_pi.0.weight'].detach().numpy()
+    b1 = checkpoint['actor.latent_pi.0.bias'].detach().numpy()
 
-    w2 = checkpoint['state_dict']['fc2.weight'].detach().numpy()
-    b2 = checkpoint['state_dict']['fc2.bias'].detach().numpy()
+    w2 = checkpoint['actor.latent_pi.2.weight'].detach().numpy()
+    b2 = checkpoint['actor.latent_pi.2.bias'].detach().numpy()
 
-    w3 = checkpoint['state_dict']['fc3.weight'].detach().numpy()
-    b3 = checkpoint['state_dict']['fc3.bias'].detach().numpy()
+    w3 = checkpoint['actor.mu.weight'].detach().numpy()
+    b3 = checkpoint['actor.mu.bias'].detach().numpy()
 
     # =========================================================================
     # CONFIGURATION: Set Fixed-Point (Q-Format) parameters per layer

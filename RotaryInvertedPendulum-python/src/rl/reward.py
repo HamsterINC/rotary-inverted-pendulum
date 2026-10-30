@@ -30,8 +30,8 @@ class RewardWeights:
     k_action: float = 0.20       # action magnitude penalty
 
     # Extras (default 0 = disabled, preserves canonical 5-term reward).
-    k_action_rate: float = 0.02   # penalty on (a_t - a_{t-1})² ("command jerk")
-    k_motor_jerk: float = 0.01    # penalty on (motor_vel_t - motor_vel_{t-1})²
+    k_action_rate: float = 0.0   # penalty on (a_t - a_{t-1})² ("command jerk")
+    k_motor_jerk: float = 0.0    # penalty on (motor_vel_t - motor_vel_{t-1})²
 
     # Multiplicative stillness bonus: ADDS k · exp(-θ²/σ_θ²) · exp(-α̇²/σ_v²).
     # Targets Kapitza-style resonance balance: the product is only large
@@ -40,6 +40,35 @@ class RewardWeights:
     k_stillness_bonus: float = 0.0
     sigma_theta: float = 0.3              # bonus active within ~17°
     sigma_motor_vel: float = 1.0          # full bonus only at α̇ < ~1 rad/s
+
+    # Per-step ALIVE OFFSET (2026-07-21 audit finding F1). The canonical
+    # all-negative quadratic cost combined with hard-stop *termination*
+    # makes early termination attractive: hanging for a full episode costs
+    # ≈ −4000, crashing into the rail costs ≈ −200..−500 total, and even the
+    # best balancing episodes score ≈ −140 — so "drive into the wall" is a
+    # strong local optimum, especially under DR when swing-up succeeds less
+    # (observed as the stage-2/3 collapses). A constant per-step offset
+    # ≥ the worst realistic per-step cost (~14 on this rig: θ²≈9.9 at
+    # hanging + motor-pos@rail ≈2.8 + velocity/action terms ≈1) makes the
+    # per-step reward non-negative, so terminating always forfeits value.
+    # Gymnasium's Pendulum-v1 gets away without this only because it never
+    # terminates; the Furuta sim-to-real literature (IEEE Access 2023) and
+    # the Quanser/MATLAB QUBE example both carry a positive offset/alive
+    # term. Default 0 preserves the canonical reward.
+    k_alive_offset: float = 0.0           # recommended: 15.0
+
+    # Velocity-gated UPRIGHT ALIVE bonus (Quanser/MATLAB-style constraint-
+    # gated alive term): ADDS k when |θ| ≤ alive_theta_band AND
+    # |θ̇| ≤ alive_pen_vel_limit. Unlike the raw cos/θ² shaping, a pendulum
+    # swinging *through* upright at speed earns nothing here, so
+    # spin-through farming is unprofitable. Gates match the honest balance
+    # metrics in analyze_deploy.py (|θ| ≤ 15°, |θ̇| ≤ 2 rad/s) so training
+    # optimises exactly what deployment certifies. Complements the
+    # stillness bonus above, which gates on MOTOR velocity (anti-Kapitza)
+    # rather than pendulum velocity (anti-spin). Default 0 (disabled).
+    k_upright_alive: float = 0.0          # recommended: 5.0
+    alive_theta_band: float = 0.2618      # 15°
+    alive_pen_vel_limit: float = 2.0      # rad/s
 
 
 def compute_reward(
@@ -79,4 +108,9 @@ def compute_reward(
         bonus = weights.k_stillness_bonus * upright_score * stillness_score
     else:
         bonus = 0.0
-    return float(bonus - cost)
+    alive = weights.k_alive_offset
+    if (weights.k_upright_alive > 0.0
+            and abs(theta) <= weights.alive_theta_band
+            and abs(pen_vel) <= weights.alive_pen_vel_limit):
+        alive += weights.k_upright_alive
+    return float(alive + bonus - cost)

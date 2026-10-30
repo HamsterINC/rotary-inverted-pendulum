@@ -2,246 +2,150 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Active initiatives
+## Scope: work only in `reinforcement_learning/`
 
-- **RL controller**: a multi-phase effort to replace the hand-tuned PID with a learned swing-up + balance policy. The living plan, phase status, and decisions log are in `RL_PLAN.md` at the repo root. Read that file before working on anything under `RotaryInvertedPendulum-arduino/LowLevelServer/`, `RotaryInvertedPendulum-arduino/RLControl/`, or `RotaryInvertedPendulum-python/src/rl/`. Companion docs:
-  - `docs/rl_transitions.md` — the `(s, a, r, s')` transition contract in plain English.
-  - `docs/async_control_architecture.md` — the threaded runtime that holds the configured control rate strictly during fine-tuning.
-  - `docs/control_rate_selection.md` — how to pick `control_freq_hz` and `max_action_delta_rad` from sysid measurements.
-  - `docs/sysid_runbook.md` — the measurement procedure for the inputs the two docs above depend on.
+All active work lives in `reinforcement_learning/`. It holds the simulation,
+training, deployment, and system-identification (sysid) code for a learned
+swing-up + balance controller for a rotary inverted (Furuta) pendulum.
+
+Do **not** read, edit, or take guidance from the other top-level folders
+(`RotaryInvertedPendulum-arduino/`, `RotaryInvertedPendulum-julia/`,
+`RotaryInvertedPendulum-python/`, `RotaryInvertedPendulum-FPGA/`, `esp32/`,
+`policy/`, `docs/`, `New folder/`, etc.). They are legacy or describe older
+hardware (AS5600 encoder, NEMA17, Arduino Nano). Docstrings inside
+`reinforcement_learning/` sometimes still point at those old paths
+(e.g. `RotaryInvertedPendulum-arduino/LowLevelServer/...`,
+`src/rl/...`) — treat those references as stale; the live equivalents are
+in `reinforcement_learning/`.
+
+The only file outside the folder that the code depends on is the URDF in
+`urdf/robot.urdf` (see "Where physical parameters live").
+
+## Hardware
+
+- **Controller**: ESP32 (primary). An FPGA (PYNQ) target exists as an alternative.
+- **Encoders**: AS5047P magnetic encoders (14-bit, 16384 CPR, SPI) on **both**
+  the pendulum shaft and the motor shaft.
+- **Motor**: SF2421 stepper.
+- **Driver**: TMC2209 (STEP/DIR/EN), driven by `FastAccelStepper`.
+  200 full steps × 16 microsteps = 3200 steps/rev.
+- **Serial link**: 1,000,000 baud (ESP32 `LowLevelServer.ino` and the Python clients).
+- **Motor travel**: hard limit ±135°, firmware rail brake beyond ±125°.
+
+## Folder layout
+
+```
+reinforcement_learning/
+├── Simulation/
+│   ├── pendulum_env.py        # Gymnasium + MuJoCo env, domain randomisation, actuator model
+│   └── pendulum_geometry.py   # parses urdf/robot.urdf → pendulum + arm mass/COM/inertia
+├── Training/
+│   ├── train_sac.py           # SB3 SAC trainer → Training/runs/<run_name>/
+│   ├── train_sac_qat.py       # quantization-aware variant (adds quant flags on top of train_sac)
+│   ├── qat.py                 # obs fixed-point quantizer, fake-quant layers, QATSACPolicy
+│   ├── sweep_quant.py         # sweeps quantization bit widths, tabulates performance
+│   ├── reward.py              # single source of truth for the reward (sim AND real)
+│   └── symmetry.py            # mirror symmetry (augmentation + asymmetry metric)
+├── Deploy/
+│   ├── ESP32/
+│   │   ├── LowLevelServer.ino # tethered firmware: binary serial protocol, accel-mode motor
+│   │   ├── RLControl.ino      # standalone on-device policy (MLP weights in policy_weights*.h)
+│   │   ├── StepperUtils.h     # step ↔ angle helpers
+│   │   ├── lowlevel_client.py # Python client for LowLevelServer
+│   │   ├── real_env.py        # Gymnasium env backed by the real rig (fine-tuning)
+│   │   └── client.jl          # Julia client (legacy)
+│   └── FPGA/
+│       ├── FPGA_lowlevel_client.py  # PYNQ client mirroring the C low-level server
+│       ├── FPGA_env.py              # real-rig env for the FPGA target
+│       └── *.xsa / *.xclbin         # bitstreams / hardware handoffs
+├── finetune_async.py          # threaded SAC fine-tuning on the real rig (strict control rate)
+├── run_config.py              # writes/validates config.json per run (train ↔ finetune ↔ deploy)
+├── sysid_wizard.py            # free-swing sysid: collect → fit → validate → sysid_params.json
+├── sysid_core.py              # sysid math (free-swing fit, friction derivation)
+├── sysid_accel.py             # accel-mode step/chirp response, real vs sim replay
+├── accel_lag_moving_probe.py  # measures firmware accel-command lag from a moving baseline
+├── sim_vs_real.py             # replays a real action log in sim and compares trajectories
+├── analyze_deploy.py          # balance / chatter metrics from a deploy log
+├── sysid_params.json          # measured per-rig friction (written by sysid_wizard)
+├── sysid_runs/                # raw sysid recordings (.npz, plots, metadata)
+└── accel_lag_moving_runs/     # lag-probe recordings
+```
+
+Scripts select the ESP32 or FPGA client at import time
+(`Deploy.ESP32.lowlevel_client` vs `Deploy.FPGA.FPGA_lowlevel_client`).
+
+Imports are mixed: some modules use `from Simulation...` / `from Training...`
+(expects `reinforcement_learning/` on `sys.path`), others use
+`from reinforcement_learning.Simulation...` (expects the repo root). Check
+the imports of the script you run and launch it from the matching directory.
+
+## Workflow
+
+1. **Sysid** on the rig → `sysid_wizard.py` (friction from free swings) and
+   `sysid_accel.py` / `accel_lag_moving_probe.py` (motor response and lag).
+   Results feed `sysid_params.json` and the DR ranges in `pendulum_env.py`.
+2. **Train in sim** → `Training/train_sac.py` (or `train_sac_qat.py` for a
+   quantized policy targeting the FPGA/ESP32).
+3. **Fine-tune on the rig** → `finetune_async.py` using `Deploy/ESP32/real_env.py`.
+4. **Deploy** → tethered via `LowLevelServer.ino` + the Python client, or
+   standalone via `RLControl.ino` with exported weights.
+5. **Analyse** → `analyze_deploy.py`, `sim_vs_real.py`.
+
+## Invariants that must hold
+
+- **Reward**: only in `Training/reward.py`. Both `pendulum_env.py` and
+  `real_env.py` call `compute_reward()`. Never duplicate the reward math.
+- **Run config**: `run_config.py` records action mode, control rate, action
+  scaling, obs layout, and reward extras in each run's `config.json`.
+  Fine-tune and deploy entrypoints call `check_config()` and abort on mismatch.
+  A checkpoint run with the wrong flags fails silently on the rig, so don't
+  bypass this with `--ignore-config-mismatch` unless there's a reason.
+- **Control rate**: training, fine-tuning, and deployment must use the same
+  `--control-freq` (training default 50 Hz; `RLControl.ino` runs at 50 Hz).
+  Note `finetune_async.py` defaults differ — pass the rate explicitly.
+- **Sim ↔ firmware actuator chain**: `pendulum_env.py` models the firmware
+  (action boxcar, transport delay, accel clip, ±125° rail brake, velocity cap,
+  8 ms finite-difference velocity window, encoder/step quantisation). If you
+  change `LowLevelServer.ino` or `RLControl.ino`, update the sim model to match
+  (and vice versa).
+- **Sign convention**: `LowLevelServer` flips motor and pendulum signs on
+  output; `real_env.py` un-flips on read so observations match the sim.
+- **Observation frame**: `[motor_pos, sin θ, cos θ, motor_vel, pen_vel, prev_action]`,
+  stacked `obs_history_len` frames, θ = 0 upright. `symmetry.py` relies on this layout.
 
 ## Where physical parameters live
 
-The rotary inverted pendulum has one source of truth per parameter
-class. Updating a number in any other place is a bug — the chain is:
+One source of truth per parameter class; changing a number anywhere else is a bug.
 
-- **Pendulum body geometry** (mass, COM, inertia tensor): authored in
-  Onshape → exported to `urdf/model.urdf` → parsed at import time by
-  `RotaryInvertedPendulum-python/src/rl/pendulum_geometry.py` →
-  consumed by `pendulum_env.py` (MuJoCo sim + DR), `sysid_core.py`
-  (friction derivation, sanity-check against measured period), and the
-  Julia stack (MeshCat viz, RigidBodyDynamics MPC). To change pendulum
-  mass/COM/inertia, edit Onshape → export the URDF; nothing else.
+- **Pendulum and arm geometry** (mass, COM, inertia, arm length): authored in
+  Onshape → exported to `urdf/robot.urdf` → parsed by
+  `Simulation/pendulum_geometry.py` → consumed by `pendulum_env.py` and
+  `sysid_core.py`.
+- **Per-rig friction** (viscous + Coulomb): measured by `sysid_wizard.py`,
+  stored in `sysid_params.json`, loaded by `pendulum_env.py`.
+- **Hardware / firmware constants** (encoder CPR, microsteps, motor limits,
+  max velocity/accel, DR ranges): module constants at the top of
+  `Simulation/pendulum_env.py`, with the ESP32 firmware
+  (`Deploy/ESP32/LowLevelServer.ino`) as the upstream source for motor-side values.
 
-- **Per-rig dynamic state** (viscous + Coulomb friction): measured by
-  `sysid_wizard.py` from a free-swing recording on the actual hardware,
-  written to `RotaryInvertedPendulum-python/src/rl/sysid_params.json`,
-  loaded into `PendulumParams` alongside the URDF constants. These do
-  vary between rebuilds (bearings, grease, temperature) and are the
-  only quantities the sysid pipeline measures.
+## Serial protocol (`Deploy/ESP32/LowLevelServer.ino`)
 
-- **Arm geometry** (length, mass, COM): currently hard-coded constants
-  in `pendulum_env.py` (`ARM_*`). When CAD-validated, will follow the
-  pendulum pattern — read from the `arm` link in `urdf/model.urdf`.
+Single-byte commands at 1,000,000 baud:
 
-- **Hardware/firmware constants** (motor max accel, AS5600 resolution,
-  hard-stop limits): module constants in `pendulum_env.py`, with the
-  Arduino firmware as the upstream source for the motor-side values.
+| Byte | Command | Payload |
+|------|---------|---------|
+| `0x01` | READY | board echoes `0x01` |
+| `0x02` | GET_STATE | returns 20 bytes: `uint32 time_us`, `float32 motor_pos`, `pendulum_pos`, `motor_vel`, `pendulum_vel` (rad, rad/s) |
+| `0x03` | SET_ACCEL | `float32` angular acceleration in rad/s² |
+| `0x04` | ENGAGE_MOTOR | – |
+| `0x05` | DISENGAGE_MOTOR | – |
+| `0x06` | TARE_PENDULUM | re-zero pendulum angle |
 
-## Overview
+The firmware samples encoders every 2 ms and computes velocities by finite
+difference over a 5-sample window.
 
-This is a rotary inverted pendulum control project - a classic control theory problem demonstrating system stabilization. The system consists of a pendulum mounted on a rotary base that must be balanced upright by controlling the base rotation. The project includes mechanical designs (3D printable), electronics (Arduino-based), and multiple control implementations.
+## Dependencies
 
-## Project Structure
-
-The repository is organized into three main software components:
-
-- **RotaryInvertedPendulum-arduino/**: Arduino C++ code for the microcontroller (Arduino Nano)
-  - `LowLevelServer/`: Low-level server for computer-controlled operation via serial
-  - `PIDControl/`: Self-contained PID controller running on Arduino
-  - `TestEncoder/`, `TestMotor/`, `TestSerial/`, etc.: Hardware test sketches
-
-- **RotaryInvertedPendulum-julia/**: Julia control algorithms and visualization
-  - `src/`: Main Julia package code
-  - `notebooks/`: Jupyter notebooks for experimentation (e.g., MPC development)
-
-- **RotaryInvertedPendulum-python/**: Python control implementations
-  - `src/`: Python control code (gamepad control)
-  - `test/`: Test scripts
-
-Additional directories:
-- `meshes/`: 3D-printable STL files for mechanical components
-- `diagrams/`: Circuit diagrams and system schematics
-- `urdf/`: Robot model description files
-
-## Hardware Architecture
-
-The system uses:
-- **Arduino Nano**: Microcontroller for sensor reading and motor control
-- **AS5600 Magnetic Encoder**: Measures pendulum angle (I2C communication)
-- **Stepper Motor (NEMA17)**: Rotates the base arm (via driver like DRV8825/A4988/TMC2209)
-- **AccelStepper Library**: Controls stepper motor with acceleration profiles
-
-Communication between Arduino and computer is via serial at 2,000,000 baud.
-
-## Control Approaches
-
-Two main control architectures:
-
-1. **On-device control** (Arduino): PID controller runs entirely on Arduino Nano
-   - Portable, no computer required
-   - Limited computational power
-   - See: `RotaryInvertedPendulum-arduino/PIDControl/PIDControl.ino`
-
-2. **Computer-based control** (Julia/Python): Arduino acts as low-level server
-   - High computational power for advanced algorithms (MPC, LQR)
-   - Requires USB connection to computer
-   - Arduino code: `LowLevelServer/LowLevelServer.ino`
-   - Client code: Julia files in `src/` or Python in `RotaryInvertedPendulum-python/`
-
-## Serial Communication Protocol
-
-### Text-based protocol (PIDControl)
-Commands are sent as text strings:
-- `"1"`: Check if ready
-- `"2"`: Get motor position
-- `"3"`: Get pendulum position
-- `"4 <position>"`: Set target motor position
-- `"5"`: Start motor
-- `"6"`: Stop motor
-
-### Binary protocol (LowLevelServer)
-Commands are single bytes:
-- `0x01`: Check ready
-- `0x02`: Get state (returns time, motor position, pendulum position as floats)
-- `0x03`: Set target (expects 4-byte float in radians)
-- `0x04`: Engage motor
-- `0x05`: Disengage motor
-
-## Julia Development
-
-### Setup
-```bash
-cd RotaryInvertedPendulum-julia
-julia --project=.
-```
-
-In Julia REPL:
-```julia
-using Pkg
-Pkg.instantiate()  # Install dependencies
-```
-
-### Running Control Scripts
-
-PID control from Julia:
-```julia
-using RotaryInvertedPendulum
-pid_control()  # Default: 2000000 baud, 200 Hz control
-```
-
-Low-level server client with visualization:
-```bash
-julia --project=. ../RotaryInvertedPendulum-arduino/LowLevelServer/client.jl --visualise
-```
-
-### Key Julia Files
-
-- `RotaryInvertedPendulum.jl`: Main module, defines serial commands and Arduino communication
-- `control_pid.jl`: PID controller implementation communicating over serial
-- `control_gamepad.jl`: Gamepad-based manual control
-- `mpc.jl`: Model Predictive Control implementation with system linearization
-- `utils.jl`: Utility functions
-- `precompile.jl`: Package precompilation for faster startup
-
-### Dependencies
-The Julia package uses:
-- `LibSerialPort`: Serial communication with Arduino
-- `RigidBodyDynamics`: For system dynamics modeling
-- `ForwardDiff`: Automatic differentiation for MPC linearization
-- `MeshCat`, `MeshCatMechanisms`: 3D visualization
-- `Joysticks`: Gamepad support
-- `Plots`: Data plotting
-
-## Arduino Development
-
-### Prerequisites
-Libraries required (install via Arduino IDE Library Manager):
-- [AccelStepper](https://www.airspayce.com/mikem/arduino/AccelStepper/)
-- [AS5600](https://github.com/Seeed-Studio/Seeed_Arduino_AS5600) (included in `libs/`)
-
-### Flashing Arduino
-1. Open `.ino` file in Arduino IDE
-2. Select Board: "Arduino Nano"
-3. Select Port: `/dev/cu.usbserial-*` (macOS) or appropriate COM port
-4. Upload sketch
-
-### Key Arduino Concepts
-
-**Stepper Motor Configuration:**
-- Microstepping: 8 (default) → 1600 steps/revolution
-- Enable pin inverted (DRV8825 uses active-low enable)
-- Max speed: 200,000 steps/sec
-- Acceleration: 100,000 steps/sec²
-
-**AS5600 Encoder:**
-- Provides 12-bit resolution (0-4095 raw values)
-- Maps to 0-360° or 0-2π radians
-- Handles multi-revolution tracking with wraparound logic
-- Check magnet strength on startup
-
-**PID Control Parameters:**
-- Control frequency: 200-1000 Hz (varies by implementation)
-- Manually tuned gains in `PIDControl.ino`: Kp=2.2, Ki=1.6, Kd=0.005
-- Motor position limits: ±90° from starting position (prevents wire choking)
-- Engagement margin: ±25° from vertical
-
-## Python Development
-
-Python implementation is less developed but includes gamepad control and serial test scripts. Install dependencies and run scripts from `RotaryInvertedPendulum-python/`.
-
-## Common Development Tasks
-
-### Testing Hardware
-- **Test encoder**: Flash `TestEncoder/TestEncoder.ino`, open Serial Monitor/Plotter
-- **Test motor**: Flash `TestMotor/TestMotor.ino`
-- **Test serial communication**: Flash `TestSerial/TestSerial.ino`
-
-### Hardware-in-the-Loop Testing
-For automated testing with hardware connected, use the serial monitoring script:
-
-```bash
-./RotaryInvertedPendulum-arduino/scripts/monitor_serial.sh <port> <baud_rate> <duration>
-```
-
-This script properly handles Arduino reset on serial connection and flushes old buffer data to provide clean output. Useful for verifying Arduino behavior during development without manual intervention.
-
-Example:
-```bash
-./RotaryInvertedPendulum-arduino/scripts/monitor_serial.sh /dev/cu.usbserial-10 115200 10
-```
-
-**Note:** This approach avoids common issues with direct `cat` or `stty` usage that can cause double resets or capture stale buffered data.
-
-### Serial Port Issues
-On macOS, the Arduino typically appears as `/dev/cu.usbserial-110` or similar. Update the port string in Julia/Python code if different.
-
-### Current Limiting
-Set stepper driver current limit to 0.9A (90% of motor's 1A rating) using the onboard potentiometer. Vref formulas vary by driver - see README.md.
-
-## Control Theory Notes
-
-The system implements a state-space approach where:
-- State: `[motor_angle, pendulum_angle, motor_velocity, pendulum_velocity]`
-- Control input: motor torque (converted to position commands for stepper)
-
-**MPC Implementation** (`mpc.jl`):
-- Linearizes nonlinear dynamics using `RigidBodyDynamics` and `ForwardDiff`
-- Uses RK4 integration for discrete-time dynamics
-- Linearization point: pendulum upright (π radians), motor at origin
-
-**State Machine** (both Arduino and Julia PID):
-- `WAITING`: Motor disabled, waiting for pendulum near vertical
-- `BALANCING`: Motor engaged, actively controlling
-
-## URDF and Visualization
-
-The `urdf/` directory contains robot description files used by `RigidBodyDynamics.jl` for dynamics computation and `MeshCat` for 3D visualization.
-
-## Serial Port Configuration
-
-Arduino baud rate: 2,000,000 (high-speed for real-time control)
-- Read timeout: 50ms (typical)
-- Write timeout: 10ms (typical)
-
-Always call `wait_until_ready(arduino)` after opening serial connection to synchronize with Arduino.
+Python: `stable-baselines3`, `gymnasium`, `mujoco`, `torch`, `numpy`,
+`scipy`, `pyserial`; `pynq` for the FPGA target.
+Arduino (ESP32): `FastAccelStepper`, `AS5047P`.

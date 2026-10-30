@@ -220,6 +220,10 @@ cython_debug/
 #.idea/
 
 # RL training artifacts
+policy/runs
+reinforcement_learning/accel_lag_moving_runs
+reinforcement_learning/runs
+reinforcement_learning/sysid_runs
 RotaryInvertedPendulum-python/src/rl/runs
 RotaryInvertedPendulum-python/src/rl/Output
 
