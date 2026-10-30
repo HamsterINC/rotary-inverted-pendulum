@@ -77,9 +77,25 @@ def load_sac_policy_weights_only(zip_path: str, env, device: str = "cpu") -> SAC
     """Instantiate a fresh SAC model and load policy weights directly from the zip,
 
     bypassing SB3's cloudpickle metadata (avoids CUDA/NumPy 2.x segfaults).
-    """
+    """       
+    # policy_kwargs = dict(
+    #         net_arch=dict(pi=[128, 128], qf=[128, 128]),  # Clean size for FPGA deployment
+    # )
     # 1. Initialize a clean SAC model on CPU
-    model = SAC("MlpPolicy", env=env, device=device, verbose=1)
+    model = SAC(
+            "MlpPolicy",
+            env=env,
+            learning_rate=3e-4,
+            buffer_size=400_000,
+            batch_size=256,
+            tau=0.005,
+            gamma=0.995,
+            train_freq=1,
+            gradient_steps=4,
+            #policy_kwargs=policy_kwargs,
+            ent_coef="auto",
+            verbose=1,
+    )
 
     # 2. Extract policy.pth directly from the zip archive
     with zipfile.ZipFile(zip_path, "r") as archive:
@@ -146,9 +162,9 @@ def main(argv: list[str] | None = None) -> int:
                         "tares and proceeds. On timeout, skips the tare "
                         "and proceeds anyway. 15 s gives the operator time "
                         "to stop the pendulum manually between episodes.")
-    p.add_argument("--control-freq", type=float, default=40.0,
+    p.add_argument("--control-freq", type=float, default=50.0,
                    help="strict control rate in Hz; this orchestrator holds "
-                        "this rate even at high --gradient-steps. 35 Hz is "
+                        "this rate even at high --gradient-steps. 50 Hz is "
                         "the canonical operating point for this rig — see "
                         "docs/control_rate_selection.md.")
     p.add_argument("--max-accel-rad-s2", type=float, default=150.0,

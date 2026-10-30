@@ -45,6 +45,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+NORMILIZED_OBS = False
 from FPGA_lowlevel_client import FpgaLowLevelClient
 from reward import RewardWeights, compute_reward
 from pendulum_env import (
@@ -91,7 +92,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         *,
         port: str = "/dev/cu.usbserial-110",
         baud: int = 2_000_000,
-        control_freq_hz: float = 40.0,  # canonical for this rig — see docs/control_rate_selection.md
+        control_freq_hz: float = 50.0,  # canonical for this rig — see docs/control_rate_selection.md
         max_accel_rad_s2: float = 150.0,
         episode_length_s: float = 5.0,
         # Max seconds to wait for the pendulum to come to rest between
@@ -111,7 +112,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         reward_motor_pos_weight: float = 0.5,
         reward_motor_vel_weight: float = 0.005,
         reward_action_weight: float = 0.20,
-        reward_pen_vel_weight: float = 0.001,
+        reward_pen_vel_weight: float = 0.002,
         # Smoothness penalty on (a_t - a_{t-1})². Default None → 0
         # (canonical disabled). Mirror of pendulum_env's flag.
         reward_action_rate_weight: float | None = None,
@@ -183,14 +184,20 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(1,), dtype=np.float32
         )
-        # Observation bounds match the sim env exactly. Last dim is
-        # prev_action ∈ [-1, 1], present from the accel-mode rework.
-        obs_high = np.array(
-            [MOTOR_SAFE_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
-        )
-        self.observation_space = spaces.Box(
-            low=-obs_high, high=obs_high, dtype=np.float32
-        )
+
+        if NORMILIZED_OBS:
+            self.observation_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(6,), dtype=np.float32
+            )
+        else:
+            # Observation is now 5-dim: [motor_pos, theta_norm, motor_vel, pen_vel, prev_action]
+            obs_high = np.array(
+                [MOTOR_SAFE_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+            )
+            # obs_high = np.array(
+            #             [MOTOR_LIMIT_RAD, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
+            #         )
+            self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
         # Cooperative shutdown flag. NOT auto-wired to signal handlers
         # anymore — `finetune_async.main()` installs handlers on the main
@@ -246,7 +253,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         consecutive_rest = 0
         last_pen_vel = 0.0
         while time.monotonic() - t_start < self.reset_settle_s:
-            _, _, _, pen_vel = self._read_raw_state()
+            _, _, _, _, pen_vel = self._read_raw_state()
             last_pen_vel = pen_vel
             if abs(pen_vel) < REST_THRESHOLD_RAD_S:
                 consecutive_rest += 1
@@ -268,8 +275,8 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         return np.array(
             [
                 motor_pos,
-                math.sin(theta),
                 math.cos(theta),
+                math.sin(theta),
                 self._motor_vel,
                 self._pen_vel,
                 self._prev_action,
@@ -334,7 +341,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
 
         # Read current state and prime the accel command to 0 (hold whatever
         # velocity the stepper is at — zero, since it's been disengaged).
-        motor_pos, phi, _, _ = self._read_raw_state()
+        _, motor_pos, phi, _, _ = self._read_raw_state()
         client.set_acceleration(0.0)
         client.engage_motor()
         self._motor_engaged = True
@@ -388,7 +395,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         react to whatever `apply_action` last sent.
         """
         try:
-            motor_pos, phi, motor_vel, pen_vel = self._read_raw_state()
+            time_us, motor_pos, phi, motor_vel, pen_vel = self._read_raw_state()
         except OSError:
             return self._build_obs(self._motor_pos_prev, self._phi_prev), 0.0, True, False, {}
 
