@@ -58,6 +58,13 @@ def find_run_config(policy_path: str | Path) -> dict | None:
                 return json.load(f)
     return None
 
+def _normalize(v):
+    """Make CLI values comparable to their JSON round-tripped form."""
+    if isinstance(v, (tuple, list)):
+        return [_normalize(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _normalize(x) for k, x in v.items()}
+    return v
 
 def check_config(policy_path: str | Path, expected: dict, *,
                  ignore: bool = False) -> None:
@@ -78,10 +85,11 @@ def check_config(policy_path: str | Path, expected: dict, *,
         if key not in saved or saved[key] is None or cli_val is None:
             continue
         saved_val = saved[key]
-        if isinstance(cli_val, (int, float)) and isinstance(saved_val, (int, float)):
-            same = abs(float(cli_val) - float(saved_val)) < 1e-9
+        cli_cmp = _normalize(cli_val)
+        if isinstance(cli_cmp, (int, float)) and isinstance(saved_val, (int, float)):
+            same = abs(float(cli_cmp) - float(saved_val)) < 1e-9
         else:
-            same = cli_val == saved_val
+            same = cli_cmp == saved_val
         if not same:
             mismatches.append(
                 f"  {key}: policy trained with {saved_val!r}, CLI gives {cli_val!r}"

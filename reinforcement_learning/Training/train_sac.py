@@ -19,7 +19,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import (
     CallbackList,
@@ -30,10 +29,10 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-import reinforcement_learning.Training.symmetry as symmetry
-from reinforcement_learning.Simulation.pendulum_env import (
+import Training.symmetry as symmetry
+from Simulation.pendulum_env import (
+    DR_TRANSPORT_DELAY_RANGE_S,
     OBS_NORM_PRESETS,
-    MAX_ACTION_DELTA_RAD,
     MAX_VELOCITY_RAD_S,
     MOTOR_MICROSTEPS,
     RotaryInvertedPendulumEnv,
@@ -51,10 +50,6 @@ def _resolved_config(args: argparse.Namespace) -> dict:
     return {
         "control_freq_hz": float(args.control_freq),
         "max_accel_rad_s2": float(args.max_accel_rad_s2),
-        "max_action_delta_rad": float(
-            args.max_action_delta_rad if args.max_action_delta_rad is not None
-            else MAX_ACTION_DELTA_RAD
-        ),
         "max_velocity_rad_s": float(
             args.max_velocity_rad_s if args.max_velocity_rad_s is not None
             else MAX_VELOCITY_RAD_S
@@ -95,16 +90,46 @@ def _resolved_config(args: argparse.Namespace) -> dict:
     }
 
 
+def _nominal_rig_kwargs(args: argparse.Namespace) -> dict:
+    """Env kwargs that pin the deterministic eval/render env to the NOMINAL RIG.
+
+    The reference scenario is the nominal rig, not an idealised zero-delay
+    plant. Selecting best_model at zero delay when every training episode has
+    some delay picks checkpoints out-of-distribution (observed on vel_v7:
+    stage-3 rollout reward climbed while the zero-delay eval declined).
+
+    - Transport delay: with DR on, the midpoint of the DR range actually used
+      in training (explicit CLI range, else the env default); with DR off, the
+      fixed `--transport-delay-s` the training env uses.
+    - Observation staleness: if explicitly randomised, the DR midpoint;
+      otherwise the env nominal.
+    """
+    if args.domain_randomization:
+        lo, hi = (
+            (args.dr_transport_delay_min, args.dr_transport_delay_max)
+            if args.dr_transport_delay_max is not None
+            else DR_TRANSPORT_DELAY_RANGE_S
+        )
+        delay_s = (lo + hi) / 2.0
+    else:
+        delay_s = float(args.transport_delay_s)
+    kwargs = {"transport_delay_s": delay_s}
+    if args.dr_obs_staleness_max is not None:
+        kwargs["obs_staleness_s"] = (
+            args.dr_obs_staleness_min + args.dr_obs_staleness_max
+        ) / 2.0
+    return kwargs
+
+
 def make_env(
     monitor_dir: Path | None = None,
     *,
     domain_randomization: bool = False,
     dr_motor_accel_range_rad_s2: tuple[float, float] | None = None,
-    dr_action_lag_tau_range_s: tuple[float, float] | None = None,
+    dr_transport_delay_range_s: tuple[float, float] | None = None,
     dr_control_dt_jitter_frac: float | None = None,
     control_freq_hz: float = 50.0,
     max_accel_rad_s2: float = 150.0,
-    max_action_delta_rad: float | None = None,
     max_velocity_rad_s: float | None = None,
     reward_motor_vel_weight: float | None = None,
     reward_motor_pos_weight: float | None = None,
@@ -116,7 +141,7 @@ def make_env(
     obs_history_len: int = 4,
     obs_include_velocities: bool = True,
     firmware_obs_model: bool = False,
-    action_lag_tau_s: float = 0.0,
+    transport_delay_s: float = 0.0,
     action_smooth_window: int = 4,
     dr_obs_staleness_range_s: tuple[float, float] | None = None,
     obs_staleness_s: float | None = None,
@@ -130,13 +155,13 @@ def make_env(
             obs_history_len=obs_history_len,
             obs_include_velocities=obs_include_velocities,
             firmware_obs_model=firmware_obs_model,
-            action_lag_tau_s=action_lag_tau_s,
+            transport_delay_s=transport_delay_s,
             action_smooth_window=action_smooth_window,
             reward_alive_offset=reward_alive_offset,
             reward_upright_alive_weight=reward_upright_alive_weight,
             domain_randomization=domain_randomization,
             dr_motor_accel_range_rad_s2=dr_motor_accel_range_rad_s2,
-            dr_action_lag_tau_range_s=dr_action_lag_tau_range_s,
+            dr_transport_delay_range_s=dr_transport_delay_range_s,
             dr_control_dt_jitter_frac=dr_control_dt_jitter_frac,
             control_freq_hz=control_freq_hz,
             max_accel_rad_s2=max_accel_rad_s2,
@@ -148,7 +173,7 @@ def make_env(
             env_kwargs["dr_obs_staleness_range_s"] = dr_obs_staleness_range_s
         if obs_staleness_s is not None:
             env_kwargs["obs_staleness_s"] = obs_staleness_s
-        # These two have non-None defaults in the env; only pass when the
+        # These have non-None defaults in the env; only pass when the
         # caller explicitly set a value, preserving env canonical defaults.
         if reward_motor_vel_weight is not None:
             env_kwargs["reward_motor_vel_weight"] = reward_motor_vel_weight
@@ -156,8 +181,6 @@ def make_env(
             env_kwargs["reward_motor_pos_weight"] = reward_motor_pos_weight
         if max_velocity_rad_s is not None:
             env_kwargs["max_velocity_rad_s"] = max_velocity_rad_s
-        if max_action_delta_rad is not None:
-            env_kwargs["max_action_delta_rad"] = max_action_delta_rad
         env = RotaryInvertedPendulumEnv(**env_kwargs)
         # Always wrap in Monitor so SB3's evaluate_policy can read canonical
         # episode reward/length. monitor_dir=None means in-memory only
@@ -184,9 +207,9 @@ def train(args: argparse.Namespace) -> Path:
     save_run_config(run_dir, config)
     obs_norm = args.obs_norm
     dr_accel = (args.dr_accel_min, args.dr_accel_max) if args.dr_accel_max is not None else None
-    dr_action_lag = (
-        (args.dr_action_lag_tau_min, args.dr_action_lag_tau_max)
-        if args.dr_action_lag_tau_max is not None else None
+    dr_delay = (
+        (args.dr_transport_delay_min, args.dr_transport_delay_max)
+        if args.dr_transport_delay_max is not None else None
     )
     # Opt-in only. The measured rig value is 15.6 ms, outside the env default
     # range of 2-10 ms, but widening it changes which checkpoint EvalCallback
@@ -201,12 +224,12 @@ def train(args: argparse.Namespace) -> Path:
         params_path=args.params_path,
         domain_randomization=args.domain_randomization,
         dr_motor_accel_range_rad_s2=dr_accel,
-        dr_action_lag_tau_range_s=dr_action_lag,
+        dr_transport_delay_range_s=dr_delay,
         dr_obs_staleness_range_s=dr_stale,
         dr_control_dt_jitter_frac=args.dr_dt_jitter_frac,
+        transport_delay_s=args.transport_delay_s,  # used when DR is off
         control_freq_hz=args.control_freq,
         max_accel_rad_s2=args.max_accel_rad_s2,
-        max_action_delta_rad=args.max_action_delta_rad,
         reward_motor_vel_weight=args.reward_motor_vel_weight,
         reward_motor_pos_weight=args.reward_motor_pos_weight,
         reward_stillness_bonus_weight=args.reward_stillness_bonus_weight,
@@ -222,32 +245,19 @@ def train(args: argparse.Namespace) -> Path:
         obs_norm=obs_norm,
     )])
     # Eval env is always deterministic — no DR (no obs noise, no random
-    # lag) AND no theta-bias (so best_model is selected on the bias-free
+    # delay) AND no theta-bias (so best_model is selected on the bias-free
     # reference scenario, not on a particular bias sample). It also keeps
     # hanging-only resets (upright_reset_frac=0) so the eval score always
     # reflects the full swing-up + balance task.
     #
-    # Transport delay is NOT zeroed: the reference scenario is the NOMINAL
-    # RIG, so the eval env pins delay/lag to the midpoint of the training
-    # DR ranges. Selecting best_model at zero delay when every training
-    # episode has >= 1 tick of delay picks checkpoints out-of-distribution
-    # (observed on vel_v7: stage-3 rollout reward climbed while the
-    # zero-delay eval declined — best_model was chosen by the wrong test).
-    eval_lag_tau_s = (
-        (args.dr_action_lag_tau_min + args.dr_action_lag_tau_max) / 2.0
-        if args.dr_action_lag_tau_max is not None else 0.0
-    )
-    # Same rule as delay/lag above: if staleness is randomised, the eval env
-    # sits at the DR midpoint, not the env nominal, so best_model is not
-    # chosen by a test the training episodes never saw.
+    # Transport delay and staleness are NOT zeroed: the reference scenario
+    # is the NOMINAL RIG, so `_nominal_rig_kwargs` pins them to the midpoint
+    # of the training DR ranges (see its docstring for why).
     eval_env = DummyVecEnv([make_env(
         params_path=args.params_path,
         domain_randomization=False,
-        action_lag_tau_s=eval_lag_tau_s,
-        obs_staleness_s=(sum(dr_stale) / 2.0) if dr_stale else None,
         control_freq_hz=args.control_freq,
         max_accel_rad_s2=args.max_accel_rad_s2,
-        max_action_delta_rad=args.max_action_delta_rad,
         reward_motor_vel_weight=args.reward_motor_vel_weight,
         reward_motor_pos_weight=args.reward_motor_pos_weight,
         reward_stillness_bonus_weight=args.reward_stillness_bonus_weight,
@@ -263,6 +273,7 @@ def train(args: argparse.Namespace) -> Path:
         firmware_obs_model=args.firmware_obs_model,
         action_smooth_window=args.action_smooth_window,
         obs_norm=obs_norm,
+        **_nominal_rig_kwargs(args),
     )])
 
     # γ sets the effective horizon in *steps*, so a fixed 0.99 silently
@@ -380,12 +391,13 @@ def evaluate(args: argparse.Namespace) -> None:
     check_config(args.eval, _resolved_config(args),
                  ignore=args.ignore_config_mismatch)
     print(f"Loading {args.eval}")
-    # Eval env must match the training config — control rate especially,
-    # since a 75 Hz-trained policy run at 35 Hz produces garbage. Reward
-    # weights don't affect inference but we pass them for cleaner reward
-    # reporting in the eval log. Bias DR explicitly disabled (0.0) so
-    # the eval runs against the bias-free deterministic reference (same
-    # as the train-time best_model eval).
+    # Eval env must match the training config — control rate and obs_norm
+    # especially, since a policy run at the wrong rate or with the wrong
+    # normalisation produces garbage. Reward weights don't affect inference
+    # but we pass them for cleaner reward reporting in the eval log. Bias DR
+    # explicitly disabled (0.0) so the eval runs against the bias-free
+    # deterministic reference (same as the train-time best_model eval), and
+    # delay/staleness are pinned to the nominal rig via _nominal_rig_kwargs.
     # Only pass kwargs whose CLI value is not None — env constructor has
     # non-None defaults for some of these (e.g. max_velocity_rad_s, which
     # crashes if None reaches it). Match the make_env() pattern.
@@ -399,7 +411,11 @@ def evaluate(args: argparse.Namespace) -> None:
         action_smooth_window=args.action_smooth_window,
         max_accel_rad_s2=args.max_accel_rad_s2,
         reward_stillness_bonus_weight=args.reward_stillness_bonus_weight,
+        reward_alive_offset=args.reward_alive_offset,
+        reward_upright_alive_weight=args.reward_upright_alive_weight,
         dr_theta_bias_max_rad=0.0,
+        obs_norm=args.obs_norm,
+        **_nominal_rig_kwargs(args),
     )
     if args.reward_motor_vel_weight is not None:
         env_kwargs["reward_motor_vel_weight"] = args.reward_motor_vel_weight
@@ -407,8 +423,6 @@ def evaluate(args: argparse.Namespace) -> None:
         env_kwargs["reward_motor_pos_weight"] = args.reward_motor_pos_weight
     if args.max_velocity_rad_s is not None:
         env_kwargs["max_velocity_rad_s"] = args.max_velocity_rad_s
-    if args.max_action_delta_rad is not None:
-        env_kwargs["max_action_delta_rad"] = args.max_action_delta_rad
     env = RotaryInvertedPendulumEnv(**env_kwargs)
     model = SAC.load(args.eval, device=args.device)
 
@@ -468,9 +482,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "config.json; passing a different value here is an error. "
                         "The same preset must be used on the rig (real_env.py).")
     p.add_argument("--domain-randomization", action="store_true",
-                   help="enable Phase 2 randomisation: motor lag, action delay, "
-                        "physics randomisation, observation noise. Eval env stays "
-                        "deterministic.")
+                   help="enable Phase 2 randomisation: motor accel envelope, "
+                        "residual transport delay, physics randomisation, "
+                        "observation noise. Eval env stays deterministic.")
     # Curriculum-learning DR overrides. If unset, env uses module constants.
     p.add_argument("--dr-accel-min", type=float, default=None,
                    help="lower bound on motor_max_accel_rad_s2 sampled per episode")
@@ -485,44 +499,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "Unset keeps the env default 2-10 ms. Measured on the "
                         "rig: 15.6 ms, so 0.020 covers reality — UNVALIDATED, "
                         "needs a from-scratch run before becoming the default")
-    p.add_argument("--dr-action-lag-tau-min", type=float, default=0.0,
-                   help="lower bound on first-order action-lag time constant "
-                        "(seconds) sampled per episode.")
-    p.add_argument("--dr-action-lag-tau-max", type=float, default=None,
-                   help="upper bound on first-order action-lag time constant "
-                        "(seconds). Continuous analogue of --dr-delay-max. "
-                        "Set this to override env defaults. See "
+    p.add_argument("--transport-delay-s", type=float, default=0.0,
+                   help="fixed RESIDUAL transport delay (s) applied after the "
+                        "firmware boxcar when DR is OFF (and the eval "
+                        "reference when DR is off). Total sim delay = boxcar "
+                        "(N-1)/2 ticks + this. Measure end-to-end with the "
+                        "boxcar on, subtract (N-1)/2 ticks. See "
                         "website/src/content/docs/reference/transport-delay.md.")
+    p.add_argument("--dr-transport-delay-min", type=float, default=0.0,
+                   help="lower bound on the residual transport delay (s) "
+                        "sampled per episode (DR on). Only used when "
+                        "--dr-transport-delay-max is given.")
+    p.add_argument("--dr-transport-delay-max", type=float, default=None,
+                   help="upper bound on the residual transport delay (s). "
+                        "Unset keeps the env default range "
+                        "(DR_TRANSPORT_DELAY_RANGE_S, 0-20 ms). Fractional "
+                        "ticks are supported (linear interpolation).")
     p.add_argument("--control-freq", type=float, default=50.0,
                    help="sim control rate (Hz). Must match the rate used in "
                         "fine-tuning and deployment. 50 Hz is the empirically-best "
                         "operating point for this rig — see "
                         "website/src/content/docs/reference/control-rate.md for the principled selection.")
-    p.add_argument("--action-mode", choices=("accel", "velocity", "position_delta"),
-                   default="accel",
-                   help="action semantics. 'accel': action → angular "
-                        "acceleration. 'velocity': action → velocity setpoint, "
-                        "tracked by a saturating accel P-law (same firmware "
-                        "transport as accel; one fewer integrator between "
-                        "action and pendulum coupling — see the action-space "
-                        "literature cited in .notes/audit_2026-07-20.md). "
-                        "'position_delta' (RLControl.ino's mode): action → "
-                        "per-step motor-target delta. Training, fine-tuning, "
-                        "and deployment must use the same mode. Position mode "
-                        "pairs with --reward-action-rate-weight 0.05.")
     p.add_argument("--max-accel-rad-s2", type=float, default=150.0,
-                   help="accel-mode: action ∈ [-1, 1] maps to angular accel ∈ "
+                   help="action ∈ [-1, 1] maps to angular accel ∈ "
                         "[-max, +max] rad/s². Default 150 ≈ 76%% of the motor's "
                         "physical envelope (~196 rad/s² at 50 kSteps/s²). Bumped "
                         "from 100 after observing the policy saturating accel_cmd "
                         "in the first accel-mode deployment.")
-    p.add_argument("--max-action-delta-rad", type=float, default=None,
-                   help="position_delta mode: per-step motor-target delta of "
-                        "action × this (rad). Default None → env default (0.10). "
-                        "No effect in accel mode.")
     p.add_argument("--max-velocity-rad-s", type=float, default=None,
                    help="motor angular-velocity saturation cap (rad/s). "
-                        "Default None → env default (3.5). Lower values "
+                        "Default None → env default (5.0, matching the "
+                        "firmware's MOTOR_MIN_STEP_US cap). Lower values "
                         "force the policy below the Kapitza parametric "
                         "stabilisation regime, which requires a·ω above "
                         "a threshold proportional to sqrt(2gL). Capping "
@@ -589,7 +596,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "(recorded in config.json).")
     p.add_argument("--params-path", type=Path, default=None,
                    help="sysid params file describing the rig this policy is "
-                        "for. Default None → sysid_params_rig1.json next to "
+                        "for. Default None → sysid_params.json next to "
                         "pendulum_env.py. Use a per-rig file (e.g. "
                         "sysid_params_rig1.json) when rigs differ "
                         "mechanically — bearings and grease change the "
@@ -603,10 +610,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         "positions quantised to encoder/step resolution, "
                         "velocities finite-differenced over the firmware's "
                         "8 ms window, snapshot stale by 2–10 ms (DR) — fed "
-                        "to both the observation and the velocity-mode "
-                        "P-law feedback, mirroring the real host. Sim-only "
-                        "realism knob (obs shape unchanged); recorded in "
-                        "config.json so resumes/evals stay consistent.")
+                        "to the observation, mirroring the real host's "
+                        "GET_STATE read. Sim-only realism knob (obs shape "
+                        "unchanged); recorded in config.json so "
+                        "resumes/evals stay consistent.")
     p.add_argument("--action-smooth-window", type=int, default=4,
                    help="firmware-side action smoothing: the actuator "
                         "receives the moving average of the last N policy "
@@ -676,6 +683,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if (args.dr_transport_delay_max is not None
+            and args.dr_transport_delay_min > args.dr_transport_delay_max):
+        raise SystemExit(
+            "--dr-transport-delay-min must be <= --dr-transport-delay-max"
+        )
     if args.eval:
         evaluate(args)
     else:

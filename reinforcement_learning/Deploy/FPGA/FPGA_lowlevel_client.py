@@ -75,7 +75,7 @@ class FpgaLowLevelClient:
 
     def __init__(
         self,
-        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/RotaryInvertedPendulum-FPGA/lowlevel_client.xsa",
+        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/RotaryInvertedPendulum-FPGA/lowlevelclient.xsa",
         download: bool = True,
         pos_frac_bits: int = 12,     # Q3.12 rad
         vel_frac_bits: int = 7,      # Q9.7  rad/s

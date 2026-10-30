@@ -182,7 +182,7 @@ void sampleState()
 
         long initial_rawarm = raw_arm;
         if (initial_rawarm < 0) initial_rawarm += 16384;
-        pen_position_rad = (float)initial_rawarm * (TWO_PI / 16384.0f);
+        arm_position_rad = (float)initial_rawarm * (TWO_PI / 16384.0f);
     }
     else
     {
@@ -318,6 +318,13 @@ void handleCommand()
                 pen_rad_buf[i] -= offset;
             }
             pen_position_rad = 0.0f;
+
+            float offset_2 = arm_position_rad;
+            for (uint8_t i = 0; i < BUFFER_SIZE; i++)
+            {
+                arm_rad_buf[i] -= offset_2;
+            }
+            arm_position_rad = 0.0f;
         }
         interrupts();
         Serial.write(CMD_TARE_PENDULUM); 
