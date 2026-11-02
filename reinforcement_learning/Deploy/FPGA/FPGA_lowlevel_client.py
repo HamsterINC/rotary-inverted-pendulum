@@ -75,7 +75,7 @@ class FpgaLowLevelClient:
 
     def __init__(
         self,
-        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/RotaryInvertedPendulum-FPGA/lowlevelclient.xsa",
+        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/reinforcement_learning/Deploy/FPGA/lowlevel_client_4x.xsa",
         download: bool = True,
         pos_frac_bits: int = 12,     # Q3.12 rad
         vel_frac_bits: int = 7,      # Q9.7  rad/s
@@ -123,6 +123,11 @@ class FpgaLowLevelClient:
         # Known-safe initial state, like main() in the C firmware.
         self._hal_write_accel_raw(0)
         self._hal_write_ctrl(0)
+        try:
+            input("Home both encoders and then press enter.")
+        except EOFError:
+            print("  (no stdin; engaging in 2 s)")
+            time.sleep(2.0)
 
     # ------------------------------------------------------------------
     # HAL

@@ -60,6 +60,7 @@ from Simulation.pendulum_env import (
     RotaryInvertedPendulumEnv,
     MAX_ACCEL_RAD_S2,
     MAX_VELOCITY_RAD_S,
+    _wrap_pi,
 )
 
 
@@ -84,12 +85,12 @@ def waveform_step(t: float) -> float:
     if t < 0.50: return -50.0
     if t < 1.0: return 0.0
     # Pulse 2: amplitude 100, T=0.05s
-    if t < 1.10: return +100.0
-    if t < 1.15: return -100.0
+    if t < 1.05: return +100.0
+    if t < 1.10: return -100.0
     if t < 1.6:  return 0.0
     # Pulse 3: amplitude 150, T=0.033s
     if t < 1.633: return +150.0
-    if t < 1.667: return -150.0
+    if t < 1.666: return -150.0
     if t < 2.2:   return 0.0
     # Pulse 4: negative-side first
     if t < 2.25:  return -100.0
@@ -223,7 +224,7 @@ def run_real(port, baud: int, waveform_fn, duration: float, sample_rate: float) 
                 accel_log[n] = a
                 t_state[n] = s.time_us * 1e-6 - dev_t0
                 motor[n] = -s.motor_pos_rad
-                pen[n] = -s.pendulum_pos_rad
+                pen[n] = _wrap_pi(-s.pendulum_pos_rad)
                 n += 1
 
                 next_tick += period
