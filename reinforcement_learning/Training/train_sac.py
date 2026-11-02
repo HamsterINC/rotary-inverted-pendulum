@@ -30,6 +30,8 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 import Training.symmetry as symmetry
+from Training.portable_buffer import load_buffer
+from Training.portable_buffer import export_buffer
 from Simulation.pendulum_env import (
     DR_TRANSPORT_DELAY_RANGE_S,
     OBS_NORM_PRESETS,
@@ -384,6 +386,14 @@ def train(args: argparse.Namespace) -> Path:
     final_path = run_dir / "last.zip"
     model.save(final_path)
     print(f"Final model saved to {final_path}")
+
+    # Pickle-free buffer export for on-device fine-tuning. SB3's own
+    # save_replay_buffer() pickles NumPy-2 arrays, which the Zynq's NumPy 1.x
+    # cannot unpickle (no `numpy._core`). Plain .npy files load on any NumPy.
+    if args.export_buffer:
+        buf_dir = run_dir / "replay_buffer"
+        n = export_buffer(model.replay_buffer, buf_dir)
+        print(f"Replay buffer ({n} transitions) exported to {buf_dir}")
     return run_dir
 
 
@@ -675,6 +685,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--eval", default=None,
                    help="if set, skip training and render an eval rollout from this checkpoint")
     p.add_argument("--eval-seconds", type=float, default=30.0)
+    p.add_argument("--export-buffer", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="after training, write the replay buffer to "
+                        "runs/<run>/replay_buffer/ as plain .npy files + "
+                        "meta.json (no pickle), loadable on the Zynq's older "
+                        "NumPy via Training.portable_buffer.load_buffer.")
     p.add_argument("--ignore-config-mismatch", action="store_true",
                    help="downgrade the config.json validation abort (on "
                         "--resume / --eval) to a warning")
