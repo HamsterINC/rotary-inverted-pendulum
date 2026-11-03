@@ -330,7 +330,7 @@ def move_motor_to(
     client.tare_pendulum()
     while time.monotonic() - t_start < timeout_s:
         s = client.get_state()
-        print(s)
+        # print(s)
         motor_pos = -s.motor_pos_rad
         motor_vel = -s.motor_vel_rad_s
 

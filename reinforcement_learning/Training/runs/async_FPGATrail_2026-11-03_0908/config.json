@@ -1,0 +1,22 @@
+{
+  "action_smooth_window": 4,
+  "control_freq_hz": 50.0,
+  "firmware_obs_model": true,
+  "max_accel_rad_s2": 150.0,
+  "max_velocity_rad_s": 5.0,
+  "mirror_augment": true,
+  "motor_microsteps": 16,
+  "net-arch": [
+    256,
+    256
+  ],
+  "obs_history_len": 4,
+  "obs_include_velocities": true,
+  "obs_norm": "raw",
+  "params_path": null,
+  "reward_alive_offset": 15.0,
+  "reward_motor_pos_weight": 0.5,
+  "reward_motor_vel_weight": 0.005,
+  "reward_stillness_bonus_weight": 5.0,
+  "reward_upright_alive_weight": 5.0
+}

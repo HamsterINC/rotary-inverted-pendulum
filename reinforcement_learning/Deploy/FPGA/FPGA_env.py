@@ -67,6 +67,19 @@ from Simulation.pendulum_env import (
     _wrap_pi,
 )
 
+HOME_TARGET_RAD = 0.0      # motor position to home to (same frame as _read_raw_state)
+HOME_KP = 40.0             # [1/s^2]  position gain -> accel command
+HOME_KD = 12.6             # [1/s]    ~2*sqrt(KP) for critical damping
+HOME_MAX_ACCEL = 20.0      # [rad/s^2] clip on homing accel
+HOME_TOL_RAD = 0.02        # position tolerance to count as "at home"
+HOME_VEL_TOL = 0.3         # [rad/s]  velocity tolerance to count as "at home"
+HOME_HZ = 50.0             # homing control rate
+HOME_TIMEOUT_S = 4.0       # give up after this long
+HOME_SETTLE_S = 0.3        # must stay inside tolerance this long
+# If your step() flips the sign of the accel before sending it to the
+# firmware, set this to -1.0 so homing uses the same convention.
+HOME_ACCEL_SIGN = 1.0
+
 
 HERE = Path(__file__).resolve().parent
 
@@ -405,6 +418,55 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
             weights=self._reward_weights,
         )
 
+    def _home_motor(self, client) -> bool:
+        """PD-servo the motor to HOME_TARGET_RAD. Returns True if it settled."""
+        dt = 1.0 / HOME_HZ
+        settle_needed = max(1, int(round(HOME_SETTLE_S * HOME_HZ)))
+        settle_count = 0
+        homed = False
+ 
+        # The motor is normally left engaged by the previous episode, but make
+        # sure — set_acceleration does nothing on a disengaged motor.
+        client.set_acceleration(0.0)
+        if not self._motor_engaged:
+            client.engage_motor()
+            self._motor_engaged = True
+ 
+        t_start = time.monotonic()
+        next_tick = t_start
+        try:
+            while time.monotonic() - t_start < HOME_TIMEOUT_S:
+                # Use the same state reader as the policy loop so the sign
+                # convention of motor_pos / motor_vel is guaranteed to match.
+                _, motor_pos, _, motor_vel, _ = self._read_raw_state()
+ 
+                error = HOME_TARGET_RAD - motor_pos
+                accel = HOME_KP * error - HOME_KD * motor_vel
+                accel = float(np.clip(accel, -HOME_MAX_ACCEL, HOME_MAX_ACCEL))
+                client.set_acceleration(HOME_ACCEL_SIGN * accel)
+ 
+                if abs(error) < HOME_TOL_RAD and abs(motor_vel) < HOME_VEL_TOL:
+                    settle_count += 1
+                    if settle_count >= settle_needed:
+                        homed = True
+                        break
+                else:
+                    settle_count = 0
+ 
+                next_tick += dt
+                sleep_for = next_tick - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    # Fell behind (slow serial read etc.) — resync instead of
+                    # firing a burst of catch-up commands.
+                    next_tick = time.monotonic()
+        finally:
+            # Never leave a nonzero accel latched in the firmware.
+            client.set_acceleration(0.0)
+ 
+        return homed
+
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
@@ -412,6 +474,9 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         client = self._ensure_open()
+
+        homed = self._home_motor(client)
+
 
         # Disengage the motor and wait for the pendulum to come to rest.
         # Taring a moving pendulum captures a non-rest sample as the new

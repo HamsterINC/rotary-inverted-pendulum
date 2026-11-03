@@ -1,0 +1,10 @@
+{
+  "source_run": "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/reinforcement_learning/Training/runs/FPGATrail",
+  "checkpoint": "best_model.zip",
+  "sim_buffer": "replay_buffer",
+  "real_buffer": null,
+  "real_frac_start": 0.5,
+  "real_frac_end": 0.9,
+  "real_frac_ramp_steps": 40000,
+  "started": "2026-11-03 08:23:00"
+}
