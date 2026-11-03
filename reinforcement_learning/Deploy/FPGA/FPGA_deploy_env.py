@@ -10,13 +10,15 @@ waits for the next PL inference and returns what happened:
 so (prev_obs, info["action"], reward, obs, terminated) is one transition, built
 from the PL step log: the observation is exactly what the network saw and the
 action exactly what it produced. `collect_episode()` runs a whole episode and
-returns those transitions as arrays; `finetune_deploy.py` turns that into a
-train-between-episodes loop (upload weights -> episode -> SAC updates -> ...).
+returns those transitions as arrays for a train-between-episodes loop
+(upload weights -> episode -> SAC updates -> ...).
 
 Observation / action / reward follow pendulum_env so a sim checkpoint matches:
-    - Observation: ONE frame [motor_pos, sin θ, cos θ, motor_vel, pen_vel, prev_act]
-      in raw units (obs_norm="raw", obs_history_len=1, velocities on) — that is
-      the network input the PL computes in hardware.
+    - Observation: obs_history_len stacked frames (oldest -> newest) of
+      [motor_pos, sin θ, cos θ, motor_vel, pen_vel, prev_act] in raw units
+      (obs_norm="raw", velocities on), seeded with copies of the first frame —
+      exactly the network input the PL builds (OBS_HISTORY in board_top).
+      The step log holds the newest frame; the env stacks them the same way.
     - Action: commanded acceleration / ACCEL_FULL_SCALE, in [-1, 1].
     - Reward: Training/reward.py, on the state AFTER the action (as in FPGA_env).
 
@@ -33,10 +35,13 @@ Termination / truncation (the episode really stops on the rig):
       (the PL rail brake at 125 deg normally stops it before that),
     - either way step() disengages the motor, so the policy stops running.
 
+Settings baked into the bitstream (board_top localparams) and checked against
+config.json when the env opens the rig: control_freq_hz, obs_history_len,
+action_smooth_window (PL boxcar on the actuator), max_velocity_rad_s.
+
 Differences from the sim the policy should know about (reported, not fixed):
     - the PL applies clamp(mu, -1, 1); SAC's deterministic action is tanh(mu),
-    - prev_act is the PL's raw (unclipped) last output,
-    - the PL policy runs at 40 Hz.
+    - prev_act is the PL's raw (unclipped) last output.
 """
 
 from __future__ import annotations
@@ -75,8 +80,8 @@ HOME_TIMEOUT_S = 4.0       # give up after this long
 HOME_SETTLE_S = 0.3        # must stay inside tolerance this long
 HOME_ACCEL_SIGN = 1.0      # PS accel and motor angle share the PL frame
 
-OBS_DIM = 6
-FIRST_STEP_TIMEOUT_S = 1.0     # engage -> first inference (SETTLE_TICKS + 25 ms)
+FRAME_DIM = 6
+FIRST_STEP_TIMEOUT_S = 1.0     # engage -> first inference (SETTLE_TICKS + 1-2 ticks)
 
 
 class FpgaDeployEnv(gym.Env):
@@ -103,7 +108,12 @@ class FpgaDeployEnv(gym.Env):
         reward_stillness_sigma_motor_vel_rad_s: float = 1.0,
         reward_alive_offset: float | None = None,
         reward_upright_alive_weight: float | None = None,
+        # Must equal the bitstream's OBS_HISTORY / CONTROL_HZ; checked when the
+        # rig is opened (they size the observation space and the episode).
+        obs_history_len: int = 1,
+        control_freq_hz: float = PL_CONTROL_HZ,
         client: FpgaDeployClient | None = None,
+        run_config: dict | None = None,  # config.json: checked against the PL settings
     ):
         super().__init__()
         self._bitstream_path = bitstream_path
@@ -112,9 +122,13 @@ class FpgaDeployEnv(gym.Env):
         self.reset_settle_s = float(reset_settle_s)
         self.terminate_on_hard_stop = terminate_on_hard_stop
         self.hard_stop_penalty = float(hard_stop_penalty)
-        self.control_freq_hz = PL_CONTROL_HZ
+        self.control_freq_hz = float(control_freq_hz)
         self.max_accel_rad_s2 = ACCEL_FULL_SCALE
-        self._max_steps = int(round(self.episode_length_s * PL_CONTROL_HZ))
+        self._max_steps = int(round(self.episode_length_s * self.control_freq_hz))
+        self.obs_history_len = int(obs_history_len)
+        self.obs_dim = FRAME_DIM * self.obs_history_len
+        self._run_config = run_config
+        self._frames: list[np.ndarray] = []
 
         self._reward_weights = RewardWeights(
             k_pen_vel=reward_pen_vel_weight,
@@ -128,12 +142,14 @@ class FpgaDeployEnv(gym.Env):
             k_upright_alive=float(reward_upright_alive_weight or 0.0),
         )
 
-        # Same spaces as pendulum_env with history 1, so SB3 models load unchanged.
+        # Same spaces as pendulum_env, so SB3 models load unchanged.
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
-        high = np.full(OBS_DIM, np.inf, dtype=np.float32)
+        high = np.full(self.obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-high, high=high, dtype=np.float32)
 
-        self._client = client
+        self._client = None
+        if client is not None:
+            self._attach(client)
         self._next_index = 0            # next log index to consume
         self._episode_id = -1           # PL engage counter of the running episode
         self._prev: StepRecord | None = None
@@ -147,7 +163,8 @@ class FpgaDeployEnv(gym.Env):
             f"upright_alive={w.k_upright_alive} stillness={w.k_stillness_bonus} "
             f"motor_pos={w.k_motor_pos} motor_vel={w.k_motor_vel} "
             f"action={w.k_action} pen_vel={w.k_pen_vel} | "
-            f"{PL_CONTROL_HZ:g} Hz (PL), {self.episode_length_s:g} s episodes"
+            f"obs: history={self.obs_history_len} | "
+            f"{self.control_freq_hz:g} Hz, {self.episode_length_s:g} s episodes"
         )
 
     # ------------------------------------------------------------------
@@ -178,8 +195,6 @@ class FpgaDeployEnv(gym.Env):
                 config = json.load(f)
 
         problems = []
-        if int(config.get("obs_history_len", 1)) != 1:
-            problems.append(f"obs_history_len={config['obs_history_len']} (PL: 1)")
         if not bool(config.get("obs_include_velocities", True)):
             problems.append("obs_include_velocities=False (PL: True)")
         if config.get("obs_norm", "raw") != "raw":
@@ -190,16 +205,15 @@ class FpgaDeployEnv(gym.Env):
         if problems:
             raise ValueError("checkpoint does not match the PL network: " + ", ".join(problems))
 
-        freq = float(config.get("control_freq_hz", PL_CONTROL_HZ))
-        if abs(freq - PL_CONTROL_HZ) > 1e-6:
-            print(f"[deploy_env] WARNING: checkpoint trained at {freq:g} Hz, PL runs at "
-                  f"{PL_CONTROL_HZ:g} Hz (CONTROL_TICK_DIVISOR)")
         accel = float(config.get("max_accel_rad_s2", ACCEL_FULL_SCALE))
         if abs(accel - ACCEL_FULL_SCALE) > 1e-6:
             print(f"[deploy_env] WARNING: checkpoint max_accel_rad_s2={accel:g}, PL full "
                   f"scale is {ACCEL_FULL_SCALE:g} rad/s^2 (ACCEL_FULL_SCALE)")
 
         kwargs = {k: config[k] for k in cls._CONFIG_KEYS if k in config}
+        kwargs["obs_history_len"] = int(config.get("obs_history_len", 4))
+        kwargs["control_freq_hz"] = float(config.get("control_freq_hz", 50.0))
+        kwargs["run_config"] = config
         kwargs.update(overrides)
         return cls(**kwargs)
 
@@ -213,8 +227,37 @@ class FpgaDeployEnv(gym.Env):
             kw = {"download": self._download}
             if self._bitstream_path is not None:
                 kw["bitstream_path"] = self._bitstream_path
-            self._client = FpgaDeployClient(**kw)
+            self._attach(FpgaDeployClient(**kw))
         return self._client
+
+    def _attach(self, client: FpgaDeployClient) -> None:
+        """Check the bitstream's baked-in settings against this env / config.json."""
+        pl = client.weights.config
+        problems = []
+        if pl.obs_history != self.obs_history_len:
+            problems.append(f"obs_history_len: env {self.obs_history_len}, PL {pl.obs_history}")
+        if abs(pl.control_freq_hz - self.control_freq_hz) > 1e-3:
+            problems.append(f"control_freq_hz: env {self.control_freq_hz:g}, PL {pl.control_freq_hz:g}")
+        if self._run_config is not None:
+            problems += [m for m in pl.mismatches(self._run_config)
+                         if not m.startswith(("obs_history_len", "control_freq_hz"))]
+        if problems:
+            client.disengage_safely()
+            raise ValueError("bitstream settings do not match the policy: " + "; ".join(problems)
+                             + " (board_top localparams vs config.json)")
+        print(f"[deploy_env] PL: history {pl.obs_history}, action smoothing "
+              f"{pl.action_smooth_window}, v_max {pl.max_velocity_rad_s:g} rad/s, "
+              f"{pl.control_freq_hz:g} Hz")
+        self._client = client
+
+    def _stack(self, frame: np.ndarray, first: bool = False) -> np.ndarray:
+        """Push one frame (newest) and return the stacked observation, the way
+        the PL builds the network input."""
+        if first:
+            self._frames = [frame] * self.obs_history_len
+        else:
+            self._frames = self._frames[1:] + [frame]
+        return np.concatenate(self._frames).astype(np.float32)
 
     def _on_signal(self, *_):
         self._sigterm_received = True
@@ -328,7 +371,7 @@ class FpgaDeployEnv(gym.Env):
         self._pending = []
         self._prev = first
         self._step_count = 0
-        return first.obs.copy(), {"record": first, "homed": homed, "tared": rested}
+        return self._stack(first.obs.copy(), first=True), {"record": first, "homed": homed, "tared": rested}
 
     def step(self, action=None):
         """Wait for the next PL step. `action` is ignored (the PL decides)."""
@@ -337,7 +380,7 @@ class FpgaDeployEnv(gym.Env):
         if self._prev is None:
             raise RuntimeError("step() called before reset()")
 
-        rec = self._next_record(timeout=4.0 / PL_CONTROL_HZ)
+        rec = self._next_record(timeout=4.0 / self.control_freq_hz)
         prev = self._prev
         gap = rec.episode_step != prev.episode_step + 1
         a = prev.action                          # action taken from prev.obs
@@ -364,7 +407,7 @@ class FpgaDeployEnv(gym.Env):
         self._prev = rec
         if terminated or truncated:
             self.disengage_safely()              # episode over: stop the PL policy
-        return rec.obs.copy(), float(reward), bool(terminated), bool(truncated), info
+        return self._stack(rec.obs.copy()), float(reward), bool(terminated), bool(truncated), info
 
     def collect_episode(self, *, disengage_at_end: bool = True) -> dict:
         """reset() + step() until the episode ends; returns transition arrays:
@@ -389,10 +432,10 @@ class FpgaDeployEnv(gym.Env):
 
         n = len(R)
         return {
-            "obs": np.asarray(O, dtype=np.float32).reshape(n, OBS_DIM),
+            "obs": np.asarray(O, dtype=np.float32).reshape(n, self.obs_dim),
             "actions": np.asarray(A, dtype=np.float32).reshape(n, 1),
             "rewards": np.asarray(R, dtype=np.float32),
-            "next_obs": np.asarray(O2, dtype=np.float32).reshape(n, OBS_DIM),
+            "next_obs": np.asarray(O2, dtype=np.float32).reshape(n, self.obs_dim),
             "terminated": np.asarray(T, dtype=bool),
             "valid": np.asarray(V, dtype=bool),
             "return": float(np.sum(R)),

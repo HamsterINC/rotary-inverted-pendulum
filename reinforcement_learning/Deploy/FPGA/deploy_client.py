@@ -75,7 +75,7 @@ OBS_FRAC_BITS    = 9             # FRAC_POS = FRAC_VEL = FRAC_W = 9 (sin/cos too
 ACTION_FRAC_BITS = 9             # FRAC_ACCEL: 512 = action 1.0
 ACCEL_FULL_SCALE = 150.0         # rad/s^2 at action 1.0
 MOTOR_ENC_CPR    = 4000          # motor encoder x4 counts/rev (calc_state_2 CPR)
-PL_CONTROL_HZ    = 50.0          # CONTROL_TICK_DIVISOR = 2_500_000 @ 100 MHz
+PL_CONTROL_HZ    = 50.0          # default only; the bitstream reports its rate (weights.config)
 SAFE_LIMIT_RAD   = 2.1816616     # PL rail brake (125 deg)
 
 TARE_SETTLE_S    = 0.005         # > one 2 ms sample + pipeline
