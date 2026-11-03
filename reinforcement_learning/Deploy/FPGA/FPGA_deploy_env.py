@@ -1,0 +1,413 @@
+"""Observation-only environment for the on-PL policy (deployment bitstream).
+
+Unlike FPGA_env.RealRotaryInvertedPendulumEnv, the host never chooses an action:
+the PL runs the MLP at 40 Hz and drives the stepper itself. Every `step()` just
+waits for the next PL inference and returns what happened:
+
+    obs, reward, terminated, truncated, info = env.step()
+    info["action"]   action the PL took from the PREVIOUS obs (clipped to [-1, 1])
+
+so (prev_obs, info["action"], reward, obs, terminated) is one transition, built
+from the PL step log: the observation is exactly what the network saw and the
+action exactly what it produced. `collect_episode()` runs a whole episode and
+returns those transitions as arrays; `finetune_deploy.py` turns that into a
+train-between-episodes loop (upload weights -> episode -> SAC updates -> ...).
+
+Observation / action / reward follow pendulum_env so a sim checkpoint matches:
+    - Observation: ONE frame [motor_pos, sin θ, cos θ, motor_vel, pen_vel, prev_act]
+      in raw units (obs_norm="raw", obs_history_len=1, velocities on) — that is
+      the network input the PL computes in hardware.
+    - Action: commanded acceleration / ACCEL_FULL_SCALE, in [-1, 1].
+    - Reward: Training/reward.py, on the state AFTER the action (as in FPGA_env).
+
+Reset behaviour (same sequence as FPGA_env):
+    - engage with the policy OFF and PD-home the motor to angle 0 with PS
+      acceleration commands (live telemetry, 50 Hz),
+    - disengage, wait for the pendulum to rest,
+    - tare (motor angle and pendulum) if it rested,
+    - start the PL policy, wait for its first inference = obs of step 0.
+
+Termination / truncation (the episode really stops on the rig):
+    - truncated after `episode_length_s` of PL steps (8 s by default),
+    - terminated with `hard_stop_penalty` if |motor_pos| >= MOTOR_LIMIT_RAD
+      (the PL rail brake at 125 deg normally stops it before that),
+    - either way step() disengages the motor, so the policy stops running.
+
+Differences from the sim the policy should know about (reported, not fixed):
+    - the PL applies clamp(mu, -1, 1); SAC's deterministic action is tanh(mu),
+    - prev_act is the PL's raw (unclipped) last output,
+    - the PL policy runs at 40 Hz.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import time
+from pathlib import Path
+
+import gymnasium as gym
+import numpy as np
+from gymnasium import spaces
+
+from Deploy.FPGA.deploy_client import (
+    ACCEL_FULL_SCALE,
+    PL_CONTROL_HZ,
+    FpgaDeployClient,
+    LogOverrun,
+    StepRecord,
+)
+from Training.reward import RewardWeights, compute_reward
+from Simulation.pendulum_env import MOTOR_LIMIT_RAD
+
+# Same rest detection and homing as FPGA_env
+REST_THRESHOLD_RAD_S = 0.5
+REST_DURATION_S = 1.0
+
+HOME_TARGET_RAD = 0.0      # motor angle to home to (0 = last tare)
+HOME_KP = 40.0             # [1/s^2]  position gain -> accel command
+HOME_KD = 12.6             # [1/s]    ~2*sqrt(KP) for critical damping
+HOME_MAX_ACCEL = 20.0      # [rad/s^2] clip on homing accel
+HOME_TOL_RAD = 0.02        # position tolerance to count as "at home"
+HOME_VEL_TOL = 0.3         # [rad/s]  velocity tolerance to count as "at home"
+HOME_HZ = 50.0             # homing control rate
+HOME_TIMEOUT_S = 4.0       # give up after this long
+HOME_SETTLE_S = 0.3        # must stay inside tolerance this long
+HOME_ACCEL_SIGN = 1.0      # PS accel and motor angle share the PL frame
+
+OBS_DIM = 6
+FIRST_STEP_TIMEOUT_S = 1.0     # engage -> first inference (SETTLE_TICKS + 25 ms)
+
+
+class FpgaDeployEnv(gym.Env):
+    """The rig running the PL policy, observed step by step."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(
+        self,
+        *,
+        bitstream_path: str | Path | None = None,
+        download: bool = True,
+        episode_length_s: float = 8.0,
+        reset_settle_s: float = 15.0,
+        terminate_on_hard_stop: bool = True,
+        hard_stop_penalty: float = 5.0,
+        # Reward weights: same defaults / meaning as pendulum_env.py and FPGA_env.
+        reward_motor_pos_weight: float = 0.5,
+        reward_motor_vel_weight: float = 0.005,
+        reward_action_weight: float = 0.20,
+        reward_pen_vel_weight: float = 0.001,
+        reward_stillness_bonus_weight: float | None = None,
+        reward_stillness_sigma_theta_rad: float = 0.3,
+        reward_stillness_sigma_motor_vel_rad_s: float = 1.0,
+        reward_alive_offset: float | None = None,
+        reward_upright_alive_weight: float | None = None,
+        client: FpgaDeployClient | None = None,
+    ):
+        super().__init__()
+        self._bitstream_path = bitstream_path
+        self._download = download
+        self.episode_length_s = float(episode_length_s)
+        self.reset_settle_s = float(reset_settle_s)
+        self.terminate_on_hard_stop = terminate_on_hard_stop
+        self.hard_stop_penalty = float(hard_stop_penalty)
+        self.control_freq_hz = PL_CONTROL_HZ
+        self.max_accel_rad_s2 = ACCEL_FULL_SCALE
+        self._max_steps = int(round(self.episode_length_s * PL_CONTROL_HZ))
+
+        self._reward_weights = RewardWeights(
+            k_pen_vel=reward_pen_vel_weight,
+            k_motor_pos=reward_motor_pos_weight,
+            k_motor_vel=reward_motor_vel_weight,
+            k_action=reward_action_weight,
+            k_stillness_bonus=float(reward_stillness_bonus_weight or 0.0),
+            sigma_theta=float(reward_stillness_sigma_theta_rad),
+            sigma_motor_vel=float(reward_stillness_sigma_motor_vel_rad_s),
+            k_alive_offset=float(reward_alive_offset or 0.0),
+            k_upright_alive=float(reward_upright_alive_weight or 0.0),
+        )
+
+        # Same spaces as pendulum_env with history 1, so SB3 models load unchanged.
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        high = np.full(OBS_DIM, np.inf, dtype=np.float32)
+        self.observation_space = spaces.Box(low=-high, high=high, dtype=np.float32)
+
+        self._client = client
+        self._next_index = 0            # next log index to consume
+        self._episode_id = -1           # PL engage counter of the running episode
+        self._prev: StepRecord | None = None
+        self._step_count = 0
+        self._pending: list[StepRecord] = []
+        self._sigterm_received = False
+
+        w = self._reward_weights
+        print(
+            f"[deploy_env] reward: alive_offset={w.k_alive_offset} "
+            f"upright_alive={w.k_upright_alive} stillness={w.k_stillness_bonus} "
+            f"motor_pos={w.k_motor_pos} motor_vel={w.k_motor_vel} "
+            f"action={w.k_action} pen_vel={w.k_pen_vel} | "
+            f"{PL_CONTROL_HZ:g} Hz (PL), {self.episode_length_s:g} s episodes"
+        )
+
+    # ------------------------------------------------------------------
+    # Construction from a training config
+    # ------------------------------------------------------------------
+
+    _CONFIG_KEYS = (
+        "reward_motor_pos_weight",
+        "reward_motor_vel_weight",
+        "reward_action_weight",
+        "reward_pen_vel_weight",
+        "reward_stillness_bonus_weight",
+        "reward_stillness_sigma_theta_rad",
+        "reward_stillness_sigma_motor_vel_rad_s",
+        "reward_alive_offset",
+        "reward_upright_alive_weight",
+        "episode_length_s",
+        "hard_stop_penalty",
+        "terminate_on_hard_stop",
+    )
+
+    @classmethod
+    def from_config(cls, config: str | Path | dict, **overrides) -> "FpgaDeployEnv":
+        """Build from a training run's config.json. Fails if the checkpoint's
+        observation layout is not the one the PL computes."""
+        if not isinstance(config, dict):
+            with open(config) as f:
+                config = json.load(f)
+
+        problems = []
+        if int(config.get("obs_history_len", 1)) != 1:
+            problems.append(f"obs_history_len={config['obs_history_len']} (PL: 1)")
+        if not bool(config.get("obs_include_velocities", True)):
+            problems.append("obs_include_velocities=False (PL: True)")
+        if config.get("obs_norm", "raw") != "raw":
+            problems.append(f"obs_norm={config['obs_norm']!r} (PL: 'raw')")
+        arch = [int(x) for x in config.get("net-arch", [128, 128])]
+        if arch != [128, 128]:
+            problems.append(f"net-arch={arch} (PL: [128, 128])")
+        if problems:
+            raise ValueError("checkpoint does not match the PL network: " + ", ".join(problems))
+
+        freq = float(config.get("control_freq_hz", PL_CONTROL_HZ))
+        if abs(freq - PL_CONTROL_HZ) > 1e-6:
+            print(f"[deploy_env] WARNING: checkpoint trained at {freq:g} Hz, PL runs at "
+                  f"{PL_CONTROL_HZ:g} Hz (CONTROL_TICK_DIVISOR)")
+        accel = float(config.get("max_accel_rad_s2", ACCEL_FULL_SCALE))
+        if abs(accel - ACCEL_FULL_SCALE) > 1e-6:
+            print(f"[deploy_env] WARNING: checkpoint max_accel_rad_s2={accel:g}, PL full "
+                  f"scale is {ACCEL_FULL_SCALE:g} rad/s^2 (ACCEL_FULL_SCALE)")
+
+        kwargs = {k: config[k] for k in cls._CONFIG_KEYS if k in config}
+        kwargs.update(overrides)
+        return cls(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def client(self) -> FpgaDeployClient:
+        if self._client is None:
+            kw = {"download": self._download}
+            if self._bitstream_path is not None:
+                kw["bitstream_path"] = self._bitstream_path
+            self._client = FpgaDeployClient(**kw)
+        return self._client
+
+    def _on_signal(self, *_):
+        self._sigterm_received = True
+        self.disengage_safely()
+
+    def _wait_for_pendulum_rest(self) -> bool:
+        poll_dt_s = 0.05
+        need = int(REST_DURATION_S / poll_dt_s)
+        t0 = time.monotonic()
+        streak, last = 0, 0.0
+        while time.monotonic() - t0 < self.reset_settle_s:
+            last = self.client.get_state().pendulum_vel_rad_s
+            streak = streak + 1 if abs(last) < REST_THRESHOLD_RAD_S else 0
+            if streak >= need:
+                return True
+            time.sleep(poll_dt_s)
+        print(f"  [warn] pendulum did not settle within {self.reset_settle_s:.1f}s "
+              f"(last |pen_vel|={abs(last):.3f} rad/s); engaging anyway")
+        return False
+
+    def _next_record(self, timeout: float) -> StepRecord:
+        """Next log record of the running episode (buffered, never skips)."""
+        while not self._pending:
+            recs = self.client.wait_for_records(self._next_index, timeout=timeout)
+            self._pending = [r for r in recs if r.episode == self._episode_id]
+            self._next_index = recs[-1].index + 1
+        return self._pending.pop(0)
+
+    def _reward(self, rec: StepRecord, action: float) -> float:
+        motor_pos, s, c, motor_vel, pen_vel, _ = (float(x) for x in rec.obs)
+        return compute_reward(
+            theta=math.atan2(s, c),
+            pen_vel=pen_vel,
+            motor_pos=motor_pos,
+            motor_vel=motor_vel,
+            action=action,
+            weights=self._reward_weights,
+        )
+
+    # ------------------------------------------------------------------
+    # Gymnasium-style API (observation only)
+    # ------------------------------------------------------------------
+
+    def _home_motor(self) -> bool:
+        """PD-servo the motor to HOME_TARGET_RAD with PS acceleration commands
+        (policy off). Returns True if it settled. Same loop as FPGA_env."""
+        client = self.client
+        dt = 1.0 / HOME_HZ
+        settle_needed = max(1, int(round(HOME_SETTLE_S * HOME_HZ)))
+        settle_count = 0
+        homed = False
+        client.engage_motor()                    # driver on, policy off, accel 0
+        t_start = time.monotonic()
+        next_tick = t_start
+        try:
+            while time.monotonic() - t_start < HOME_TIMEOUT_S:
+                st = client.get_state()
+                error = HOME_TARGET_RAD - st.motor_pos_rad
+                accel = HOME_KP * error - HOME_KD * st.motor_vel_rad_s
+                accel = float(np.clip(accel, -HOME_MAX_ACCEL, HOME_MAX_ACCEL))
+                client.set_acceleration(HOME_ACCEL_SIGN * accel)
+
+                if abs(error) < HOME_TOL_RAD and abs(st.motor_vel_rad_s) < HOME_VEL_TOL:
+                    settle_count += 1
+                    if settle_count >= settle_needed:
+                        homed = True
+                        break
+                else:
+                    settle_count = 0
+
+                next_tick += dt
+                sleep_for = next_tick - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    next_tick = time.monotonic()
+        finally:
+            client.set_acceleration(0.0)
+        if not homed:
+            print(f"  [warn] homing did not settle within {HOME_TIMEOUT_S:.1f}s "
+                  f"(motor at {client.get_state().motor_pos_rad:+.3f} rad)")
+        return homed
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        super().reset(seed=seed)
+        client = self.client
+        client.disengage_motor()                 # stops a still-running episode
+        if not client.is_armed():
+            raise RuntimeError("SW1 is off (not armed): the PL will not engage")
+
+        homed = self._home_motor()
+        client.disengage_motor()
+        rested = self._wait_for_pendulum_rest()
+        if rested:
+            client.tare_pendulum()               # motor angle and pendulum -> 0
+
+        start = client.log_count()
+        client.start_policy()                    # driver on + PL policy, new episode
+        # first record of the new episode = first record after `start` with episode_step 0
+        t0 = time.monotonic()
+        while True:
+            recs = client.wait_for_records(start, timeout=FIRST_STEP_TIMEOUT_S)
+            first = next((r for r in recs if r.episode_step == 0), None)
+            if first is not None:
+                break
+            start = recs[-1].index + 1
+            if time.monotonic() - t0 > FIRST_STEP_TIMEOUT_S:
+                raise TimeoutError("no first step after engage")
+        self._episode_id = first.episode
+        self._next_index = first.index + 1
+        self._pending = []
+        self._prev = first
+        self._step_count = 0
+        return first.obs.copy(), {"record": first, "homed": homed, "tared": rested}
+
+    def step(self, action=None):
+        """Wait for the next PL step. `action` is ignored (the PL decides)."""
+        if self._sigterm_received:
+            raise KeyboardInterrupt("SIGTERM received during step")
+        if self._prev is None:
+            raise RuntimeError("step() called before reset()")
+
+        rec = self._next_record(timeout=4.0 / PL_CONTROL_HZ)
+        prev = self._prev
+        gap = rec.episode_step != prev.episode_step + 1
+        a = prev.action                          # action taken from prev.obs
+        reward = self._reward(rec, a)
+
+        self._step_count += 1
+        motor_pos = float(rec.obs[0])
+        terminated = self.terminate_on_hard_stop and abs(motor_pos) >= MOTOR_LIMIT_RAD
+        if terminated:
+            reward -= self.hard_stop_penalty
+        truncated = self._step_count >= self._max_steps
+
+        info = {
+            "action": a,
+            "action_raw": prev.action_raw,
+            "brake": prev.brake,                 # rail brake overrode the action
+            "clipped": prev.clipped,
+            "gap": gap,                          # True if PL steps were missing
+            "weight_bank": prev.weight_bank,
+            "time_us": rec.time_us,
+            "dt_s": (rec.time_us - prev.time_us) * 1e-6,
+            "record": rec,
+        }
+        self._prev = rec
+        if terminated or truncated:
+            self.disengage_safely()              # episode over: stop the PL policy
+        return rec.obs.copy(), float(reward), bool(terminated), bool(truncated), info
+
+    def collect_episode(self, *, disengage_at_end: bool = True) -> dict:
+        """reset() + step() until the episode ends; returns transition arrays:
+        obs, actions, rewards, next_obs, terminated (bool), valid (False across
+        gaps or rail-brake steps), plus episode statistics."""
+        obs, _ = self.reset()
+        O, A, R, O2, T, V, dts = [], [], [], [], [], [], []
+        try:
+            while True:
+                nxt, r, term, trunc, info = self.step()
+                O.append(obs); A.append(info["action"]); R.append(r); O2.append(nxt)
+                T.append(term); V.append(not (info["gap"] or info["brake"]))
+                dts.append(info["dt_s"])
+                obs = nxt
+                if term or trunc:
+                    break
+        except LogOverrun as err:
+            print(f"  [warn] step log overrun ({err}); episode cut short")
+        finally:
+            if disengage_at_end:
+                self.disengage_safely()
+
+        n = len(R)
+        return {
+            "obs": np.asarray(O, dtype=np.float32).reshape(n, OBS_DIM),
+            "actions": np.asarray(A, dtype=np.float32).reshape(n, 1),
+            "rewards": np.asarray(R, dtype=np.float32),
+            "next_obs": np.asarray(O2, dtype=np.float32).reshape(n, OBS_DIM),
+            "terminated": np.asarray(T, dtype=bool),
+            "valid": np.asarray(V, dtype=bool),
+            "return": float(np.sum(R)),
+            "length": n,
+            "mean_dt_s": float(np.mean(dts)) if dts else float("nan"),
+        }
+
+    def disengage_safely(self) -> None:
+        try:
+            if self._client is not None:
+                self._client.disengage_motor()
+        except Exception:
+            pass
+
+    def close(self):
+        if self._client is not None:
+            self._client.close()
+            self._client = None
