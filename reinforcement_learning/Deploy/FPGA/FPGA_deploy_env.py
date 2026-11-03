@@ -25,8 +25,13 @@ Observation / action / reward follow pendulum_env so a sim checkpoint matches:
 Reset behaviour (same sequence as FPGA_env):
     - engage with the policy OFF and PD-home the motor to angle 0 with PS
       acceleration commands (live telemetry, 50 Hz),
-    - disengage, wait for the pendulum to rest,
+    - disengage, wait for the pendulum to be still (|pen_vel| below a
+      threshold AND the angle not moving by more than a small range, both for
+      `rest_duration_s`); starts as soon as that holds, gives up after
+      `reset_settle_s`,
     - tare (motor angle and pendulum) if it rested,
+    - optional `before_start` hook (reset options / collect_episode), e.g. to
+      upload the newest weights right before the policy runs,
     - start the PL policy, wait for its first inference = obs of step 0.
 
 Termination / truncation (the episode really stops on the rig):
@@ -49,6 +54,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections import deque
 from pathlib import Path
 
 import gymnasium as gym
@@ -65,9 +71,15 @@ from Deploy.FPGA.deploy_client import (
 from Training.reward import RewardWeights, compute_reward
 from Simulation.pendulum_env import MOTOR_LIMIT_RAD
 
-# Same rest detection and homing as FPGA_env
+# Rest detection: |pen_vel| below REST_THRESHOLD_RAD_S and the pendulum angle
+# inside a REST_ANGLE_RANGE_RAD band, both for REST_DURATION_S. The angle band
+# catches a small residual swing that the velocity check alone lets through
+# (0.05 rad amplitude peaks at ~0.3 rad/s), which would otherwise be tared in
+# as an angle offset.
 REST_THRESHOLD_RAD_S = 0.5
+REST_ANGLE_RANGE_RAD = 0.03     # ~1.7 deg peak-to-peak
 REST_DURATION_S = 1.0
+REST_POLL_S = 0.02
 
 HOME_TARGET_RAD = 0.0      # motor angle to home to (0 = last tare)
 HOME_KP = 40.0             # [1/s^2]  position gain -> accel command
@@ -96,6 +108,9 @@ class FpgaDeployEnv(gym.Env):
         download: bool = True,
         episode_length_s: float = 8.0,
         reset_settle_s: float = 15.0,
+        rest_vel_threshold_rad_s: float = REST_THRESHOLD_RAD_S,
+        rest_angle_range_rad: float = REST_ANGLE_RANGE_RAD,
+        rest_duration_s: float = REST_DURATION_S,
         terminate_on_hard_stop: bool = True,
         hard_stop_penalty: float = 5.0,
         # Reward weights: same defaults / meaning as pendulum_env.py and FPGA_env.
@@ -120,6 +135,10 @@ class FpgaDeployEnv(gym.Env):
         self._download = download
         self.episode_length_s = float(episode_length_s)
         self.reset_settle_s = float(reset_settle_s)
+        self.rest_vel_threshold_rad_s = float(rest_vel_threshold_rad_s)
+        self.rest_angle_range_rad = float(rest_angle_range_rad)
+        self.rest_duration_s = float(rest_duration_s)
+        self.last_rest_wait_s = float("nan")    # how long the last reset waited
         self.terminate_on_hard_stop = terminate_on_hard_stop
         self.hard_stop_penalty = float(hard_stop_penalty)
         self.control_freq_hz = float(control_freq_hz)
@@ -263,18 +282,34 @@ class FpgaDeployEnv(gym.Env):
         self.disengage_safely()
 
     def _wait_for_pendulum_rest(self) -> bool:
-        poll_dt_s = 0.05
-        need = int(REST_DURATION_S / poll_dt_s)
+        """Return as soon as the pendulum is still: every sample of the last
+        `rest_duration_s` has |pen_vel| < threshold and all their angles lie
+        within `rest_angle_range_rad`. False on timeout (`reset_settle_s`)."""
+        need = max(2, int(round(self.rest_duration_s / REST_POLL_S)))
+        window: deque[float] = deque(maxlen=need)   # angles of the current still streak
         t0 = time.monotonic()
-        streak, last = 0, 0.0
+        last_vel, last_range = 0.0, float("nan")
         while time.monotonic() - t0 < self.reset_settle_s:
-            last = self.client.get_state().pendulum_vel_rad_s
-            streak = streak + 1 if abs(last) < REST_THRESHOLD_RAD_S else 0
-            if streak >= need:
-                return True
-            time.sleep(poll_dt_s)
-        print(f"  [warn] pendulum did not settle within {self.reset_settle_s:.1f}s "
-              f"(last |pen_vel|={abs(last):.3f} rad/s); engaging anyway")
+            if self._sigterm_received:
+                raise KeyboardInterrupt("stop requested while waiting for rest")
+            st = self.client.get_state()
+            last_vel = st.pendulum_vel_rad_s
+            if abs(last_vel) >= self.rest_vel_threshold_rad_s:
+                window.clear()
+            else:
+                window.append(st.theta)
+                if len(window) == need:
+                    ref = window[-1]   # wrap-safe spread around the newest angle
+                    d = [math.remainder(a - ref, 2.0 * math.pi) for a in window]
+                    last_range = max(d) - min(d)
+                    if last_range < self.rest_angle_range_rad:
+                        self.last_rest_wait_s = time.monotonic() - t0
+                        return True
+            time.sleep(REST_POLL_S)
+        self.last_rest_wait_s = time.monotonic() - t0
+        print(f"  [warn] pendulum not still within {self.reset_settle_s:.1f}s "
+              f"(last |pen_vel|={abs(last_vel):.3f} rad/s, angle range "
+              f"{last_range:.3f} rad); engaging anyway without tare")
         return False
 
     def _next_record(self, timeout: float) -> StepRecord:
@@ -313,6 +348,8 @@ class FpgaDeployEnv(gym.Env):
         next_tick = t_start
         try:
             while time.monotonic() - t_start < HOME_TIMEOUT_S:
+                if self._sigterm_received:
+                    break
                 st = client.get_state()
                 error = HOME_TARGET_RAD - st.motor_pos_rad
                 accel = HOME_KP * error - HOME_KD * st.motor_vel_rad_s
@@ -352,6 +389,12 @@ class FpgaDeployEnv(gym.Env):
         rested = self._wait_for_pendulum_rest()
         if rested:
             client.tare_pendulum()               # motor angle and pendulum -> 0
+
+        before_start = (options or {}).get("before_start")
+        if before_start is not None:
+            before_start()                       # e.g. upload the newest weights
+        if self._sigterm_received:               # stopped during the wait: never engage
+            raise KeyboardInterrupt("stop requested before the policy started")
 
         start = client.log_count()
         client.start_policy()                    # driver on + PL policy, new episode
@@ -408,11 +451,13 @@ class FpgaDeployEnv(gym.Env):
             self.disengage_safely()              # episode over: stop the PL policy
         return self._stack(rec.obs.copy()), float(reward), bool(terminated), bool(truncated), info
 
-    def collect_episode(self, *, disengage_at_end: bool = True) -> dict:
+    def collect_episode(self, *, disengage_at_end: bool = True, before_start=None) -> dict:
         """reset() + step() until the episode ends; returns transition arrays:
         obs, actions, rewards, next_obs, terminated (bool), valid (False across
-        gaps or rail-brake steps), plus episode statistics."""
-        obs, _ = self.reset()
+        gaps or rail-brake steps), plus episode statistics.
+        `before_start()` runs after homing/rest/tare, right before the PL
+        policy starts (see reset)."""
+        obs, reset_info = self.reset(options={"before_start": before_start})
         O, A, R, O2, T, V, dts = [], [], [], [], [], [], []
         try:
             while True:
@@ -440,6 +485,9 @@ class FpgaDeployEnv(gym.Env):
             "return": float(np.sum(R)),
             "length": n,
             "mean_dt_s": float(np.mean(dts)) if dts else float("nan"),
+            "homed": bool(reset_info["homed"]),
+            "tared": bool(reset_info["tared"]),
+            "rest_wait_s": self.last_rest_wait_s,
         }
 
     def disengage_safely(self) -> None:
