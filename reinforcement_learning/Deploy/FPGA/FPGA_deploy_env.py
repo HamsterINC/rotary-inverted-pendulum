@@ -54,7 +54,6 @@ from __future__ import annotations
 import json
 import math
 import time
-from collections import deque
 from pathlib import Path
 
 import gymnasium as gym
@@ -68,18 +67,16 @@ from Deploy.FPGA.deploy_client import (
     LogOverrun,
     StepRecord,
 )
+from Deploy.FPGA.rest_detect import (
+    REST_ANGLE_RANGE_RAD,
+    REST_DURATION_S,
+    REST_THRESHOLD_RAD_S,
+    wait_until_still,
+)
 from Training.reward import RewardWeights, compute_reward
 from Simulation.pendulum_env import MOTOR_LIMIT_RAD
 
-# Rest detection: |pen_vel| below REST_THRESHOLD_RAD_S and the pendulum angle
-# inside a REST_ANGLE_RANGE_RAD band, both for REST_DURATION_S. The angle band
-# catches a small residual swing that the velocity check alone lets through
-# (0.05 rad amplitude peaks at ~0.3 rad/s), which would otherwise be tared in
-# as an angle offset.
-REST_THRESHOLD_RAD_S = 0.5
-REST_ANGLE_RANGE_RAD = 0.03     # ~1.7 deg peak-to-peak
-REST_DURATION_S = 1.0
-REST_POLL_S = 0.02
+# Rest detection: see rest_detect.py
 
 HOME_TARGET_RAD = 0.0      # motor angle to home to (0 = last tare)
 HOME_KP = 40.0             # [1/s^2]  position gain -> accel command
@@ -282,35 +279,25 @@ class FpgaDeployEnv(gym.Env):
         self.disengage_safely()
 
     def _wait_for_pendulum_rest(self) -> bool:
-        """Return as soon as the pendulum is still: every sample of the last
-        `rest_duration_s` has |pen_vel| < threshold and all their angles lie
-        within `rest_angle_range_rad`. False on timeout (`reset_settle_s`)."""
-        need = max(2, int(round(self.rest_duration_s / REST_POLL_S)))
-        window: deque[float] = deque(maxlen=need)   # angles of the current still streak
-        t0 = time.monotonic()
-        last_vel, last_range = 0.0, float("nan")
-        while time.monotonic() - t0 < self.reset_settle_s:
-            if self._sigterm_received:
-                raise KeyboardInterrupt("stop requested while waiting for rest")
+        """Return as soon as the pendulum is still (see rest_detect). False on
+        timeout (`reset_settle_s`)."""
+        def read():
             st = self.client.get_state()
-            last_vel = st.pendulum_vel_rad_s
-            if abs(last_vel) >= self.rest_vel_threshold_rad_s:
-                window.clear()
+            return st.theta, st.pendulum_vel_rad_s
+        rested, waited, detail = wait_until_still(
+            read, max_wait_s=self.reset_settle_s,
+            vel_threshold=self.rest_vel_threshold_rad_s,
+            angle_range=self.rest_angle_range_rad,
+            duration_s=self.rest_duration_s,
+            should_stop=lambda: self._sigterm_received)
+        self.last_rest_wait_s = waited
+        if not rested:
+            if self.reset_settle_s > self.rest_duration_s:
+                print(f"  [warn] pendulum not still within {self.reset_settle_s:.1f}s "
+                      f"({detail}); engaging anyway without tare")
             else:
-                window.append(st.theta)
-                if len(window) == need:
-                    ref = window[-1]   # wrap-safe spread around the newest angle
-                    d = [math.remainder(a - ref, 2.0 * math.pi) for a in window]
-                    last_range = max(d) - min(d)
-                    if last_range < self.rest_angle_range_rad:
-                        self.last_rest_wait_s = time.monotonic() - t0
-                        return True
-            time.sleep(REST_POLL_S)
-        self.last_rest_wait_s = time.monotonic() - t0
-        print(f"  [warn] pendulum not still within {self.reset_settle_s:.1f}s "
-              f"(last |pen_vel|={abs(last_vel):.3f} rad/s, angle range "
-              f"{last_range:.3f} rad); engaging anyway without tare")
-        return False
+                print(f"  pendulum moving ({detail}): starting without tare")
+        return rested
 
     def _next_record(self, timeout: float) -> StepRecord:
         """Next log record of the running episode (buffered, never skips)."""
@@ -451,23 +438,29 @@ class FpgaDeployEnv(gym.Env):
             self.disengage_safely()              # episode over: stop the PL policy
         return self._stack(rec.obs.copy()), float(reward), bool(terminated), bool(truncated), info
 
-    def collect_episode(self, *, disengage_at_end: bool = True, before_start=None) -> dict:
+    def collect_episode(self, *, disengage_at_end: bool = True, before_start=None,
+                        on_step=None) -> dict:
         """reset() + step() until the episode ends; returns transition arrays:
         obs, actions, rewards, next_obs, terminated (bool), valid (False across
         gaps or rail-brake steps), plus episode statistics.
         `before_start()` runs after homing/rest/tare, right before the PL
-        policy starts (see reset)."""
+        policy starts (see reset). `on_step()` runs after every step that does
+        not end the episode, e.g. to upload newer weights mid-episode (the PL
+        swaps weight banks between two inferences)."""
         obs, reset_info = self.reset(options={"before_start": before_start})
-        O, A, R, O2, T, V, dts = [], [], [], [], [], [], []
+        O, A, R, O2, T, V, dts, gaps, brakes = [], [], [], [], [], [], [], [], []
+        trunc = False
         try:
             while True:
                 nxt, r, term, trunc, info = self.step()
                 O.append(obs); A.append(info["action"]); R.append(r); O2.append(nxt)
                 T.append(term); V.append(not (info["gap"] or info["brake"]))
-                dts.append(info["dt_s"])
+                dts.append(info["dt_s"]); gaps.append(info["gap"]); brakes.append(info["brake"])
                 obs = nxt
                 if term or trunc:
                     break
+                if on_step is not None:
+                    on_step()
         except LogOverrun as err:
             print(f"  [warn] step log overrun ({err}); episode cut short")
         finally:
@@ -485,6 +478,10 @@ class FpgaDeployEnv(gym.Env):
             "return": float(np.sum(R)),
             "length": n,
             "mean_dt_s": float(np.mean(dts)) if dts else float("nan"),
+            "dt_s": np.asarray(dts, dtype=np.float64),
+            "gap": np.asarray(gaps, dtype=bool),
+            "brake": np.asarray(brakes, dtype=bool),
+            "truncated": bool(trunc),
             "homed": bool(reset_info["homed"]),
             "tared": bool(reset_info["tared"]),
             "rest_wait_s": self.last_rest_wait_s,

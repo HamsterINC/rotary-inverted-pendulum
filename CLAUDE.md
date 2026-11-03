@@ -58,7 +58,10 @@ reinforcement_learning/
 │       ├── FPGA_lowlevel_client.py  # PYNQ client mirroring the C low-level server
 │       ├── FPGA_env.py              # real-rig env for the FPGA target
 │       └── *.xsa / *.xclbin         # bitstreams / hardware handoffs
-├── finetune_async.py          # threaded SAC fine-tuning on the real rig (strict control rate)
+├── finetune_async.py          # threaded SAC fine-tuning on the real rig; --inference cpu|pl
+│                              #   (policy on the PS at a strict rate, or on the PL deployment bitstream)
+├── finetune_deploy.py         # thin wrapper = finetune_async.py --inference pl
+├── finetune_metrics.py        # balance metrics + eval summary shared by the fine-tune runs
 ├── run_config.py              # writes/validates config.json per run (train ↔ finetune ↔ deploy)
 ├── sysid_wizard.py            # free-swing sysid: collect → fit → validate → sysid_params.json
 ├── sysid_core.py              # sysid math (free-swing fit, friction derivation)

@@ -95,8 +95,13 @@ HERE = Path(__file__).resolve().parent
 # - 1.0 s of sustained sub-threshold velocity rejects long-tail noise
 #   transients (a single glitch or a tiny breath of air won't trigger a
 #   false-positive tare).
-REST_THRESHOLD_RAD_S = 0.5
-REST_DURATION_S = 1.0
+# Thresholds live in rest_detect.py (shared with FPGA_deploy_env).
+from Deploy.FPGA.rest_detect import (  # noqa: E402
+    REST_ANGLE_RANGE_RAD,
+    REST_DURATION_S,
+    REST_THRESHOLD_RAD_S,
+    wait_until_still,
+)
 
 
 class RealRotaryInvertedPendulumEnv(gym.Env):
@@ -128,6 +133,9 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         # we SKIP the tare and proceed using the previous tare's zero —
         # safer than capturing a moving pendulum as the new zero.
         reset_settle_s: float = 15.0,
+        rest_vel_threshold_rad_s: float = REST_THRESHOLD_RAD_S,
+        rest_angle_range_rad: float = REST_ANGLE_RANGE_RAD,
+        rest_duration_s: float = REST_DURATION_S,
         # --- Observation layout: MUST match the sim-trained checkpoint ---
         obs_history_len: int = 4,
         obs_include_velocities: bool = True,
@@ -169,6 +177,10 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         self.max_accel_rad_s2 = max_accel_rad_s2
         self.episode_length_s = episode_length_s
         self.reset_settle_s = reset_settle_s
+        self.rest_vel_threshold_rad_s = float(rest_vel_threshold_rad_s)
+        self.rest_angle_range_rad = float(rest_angle_range_rad)
+        self.rest_duration_s = float(rest_duration_s)
+        self.last_rest_wait_s = float("nan")    # how long the last reset waited
         self.terminate_on_hard_stop = terminate_on_hard_stop
         self.hard_stop_penalty = float(hard_stop_penalty)
 
@@ -343,38 +355,30 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
                 -s.motor_vel_rad_s, -s.pendulum_vel_rad_s)
 
     def _wait_for_pendulum_rest(self, client: FpgaLowLevelClient) -> bool:
-        """Block until the pendulum has been at rest for REST_DURATION_S.
+        """Block until the pendulum is still (|pen_vel| below threshold AND the
+        angle inside a small band, both for rest_duration_s; see rest_detect).
 
-        At rest = |pen_vel| < REST_THRESHOLD_RAD_S. Polls at 20 Hz; resets
-        the streak any time a single sample exceeds the threshold so noise
-        transients don't false-positive.
-
-        Returns True if rest was achieved within `reset_settle_s`. Returns
-        False on timeout — the caller (reset) skips the tare in that case
+        Returns True as soon as that holds. Returns False on timeout
+        (`reset_settle_s`) — the caller (reset) skips the tare in that case
         rather than capturing a moving pendulum's reading as the new zero.
         """
-        poll_dt_s = 0.05  # 20 Hz
-        required_consecutive = int(REST_DURATION_S / poll_dt_s)
-        t_start = time.monotonic()
-        consecutive_rest = 0
-        last_pen_vel = 0.0
-        while time.monotonic() - t_start < self.reset_settle_s:
-            _, _, _, _, pen_vel = self._read_raw_state()
-            last_pen_vel = pen_vel
-            if abs(pen_vel) < REST_THRESHOLD_RAD_S:
-                consecutive_rest += 1
-                if consecutive_rest >= required_consecutive:
-                    return True
+        def read():
+            _, _, phi, _, pen_vel = self._read_raw_state()
+            return phi, pen_vel
+        rested, waited, detail = wait_until_still(
+            read, max_wait_s=self.reset_settle_s,
+            vel_threshold=self.rest_vel_threshold_rad_s,
+            angle_range=self.rest_angle_range_rad,
+            duration_s=self.rest_duration_s,
+            should_stop=lambda: self._sigterm_received)
+        self.last_rest_wait_s = waited
+        if not rested:
+            if self.reset_settle_s > self.rest_duration_s:
+                print(f"  [warn] pendulum not still within {self.reset_settle_s:.1f}s "
+                      f"({detail}); skipping tare for this episode")
             else:
-                consecutive_rest = 0
-            time.sleep(poll_dt_s)
-        print(
-            f"  [warn] pendulum did not settle within "
-            f"{self.reset_settle_s:.1f}s (last |pen_vel|={abs(last_pen_vel):.3f} "
-            f"rad/s, threshold={REST_THRESHOLD_RAD_S:.3f}); "
-            f"skipping tare for this episode"
-        )
-        return False
+                print(f"  pendulum moving ({detail}): starting without tare")
+        return rested
 
     def _build_obs(self, motor_pos: float, phi: float) -> np.ndarray:
         """Build one frame exactly like pendulum_env._obs and push it onto the
@@ -436,6 +440,8 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         next_tick = t_start
         try:
             while time.monotonic() - t_start < HOME_TIMEOUT_S:
+                if self._sigterm_received:
+                    break
                 # Use the same state reader as the policy loop so the sign
                 # convention of motor_pos / motor_vel is guaranteed to match.
                 _, motor_pos, _, motor_vel, _ = self._read_raw_state()
@@ -497,6 +503,12 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
                     "to pick up the CMD_TARE_PENDULUM=0x06 handler."
                 )
 
+        before_start = (options or {}).get("before_start")
+        if before_start is not None:
+            before_start()               # e.g. sync the policy snapshot
+        if self._sigterm_received:       # stopped during the wait: never engage
+            raise KeyboardInterrupt("stop requested before the episode started")
+
         # Read current state and prime the accel command to 0.
         time_us, motor_pos, phi, motor_vel, pen_vel = self._read_raw_state()
         client.set_acceleration(0.0)
@@ -517,7 +529,8 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         self._obs_history.clear()  # _build_obs reseeds with the initial frame
         self._next_tick = time.monotonic()
 
-        return self._build_obs(motor_pos, phi), {}
+        return self._build_obs(motor_pos, phi), {"homed": homed, "tared": rested,
+                                                 "rest_wait_s": self.last_rest_wait_s}
 
     def apply_action(self, action) -> float:
         """Send `action` to the motor as an angular acceleration command.
