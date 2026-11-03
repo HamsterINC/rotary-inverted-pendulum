@@ -199,9 +199,8 @@ class FpgaDeployEnv(gym.Env):
             problems.append("obs_include_velocities=False (PL: True)")
         if config.get("obs_norm", "raw") != "raw":
             problems.append(f"obs_norm={config['obs_norm']!r} (PL: 'raw')")
-        arch = [int(x) for x in config.get("net-arch", [128, 128])]
-        if arch != [128, 128]:
-            problems.append(f"net-arch={arch} (PL: [128, 128])")
+        # net-arch, history, smoothing, v_max and rate are checked against the
+        # bitstream when the rig is opened (PLConfig.mismatches)
         if problems:
             raise ValueError("checkpoint does not match the PL network: " + ", ".join(problems))
 
@@ -245,7 +244,7 @@ class FpgaDeployEnv(gym.Env):
             client.disengage_safely()
             raise ValueError("bitstream settings do not match the policy: " + "; ".join(problems)
                              + " (board_top localparams vs config.json)")
-        print(f"[deploy_env] PL: history {pl.obs_history}, action smoothing "
+        print(f"[deploy_env] PL: network {pl.shape}, action smoothing "
               f"{pl.action_smooth_window}, v_max {pl.max_velocity_rad_s:g} rad/s, "
               f"{pl.control_freq_hz:g} Hz")
         self._client = client

@@ -14,19 +14,21 @@ Typical use on the board, between episodes:
 
     ol = Overlay("board_top_AUPZU3.bit")          # .hwh next to it
     wl = WeightLoader()                           # or FpgaDeployClient(...).weights
+    print(wl.shape)                               # network the bitstream was built for
 
     # after a QAT update (torch layout: W is (out, in), inputs in HW order)
     words = pack_weights(W1, b1, W2, b2, W3, b3)  # floats -> Q.FRAC_W, or pass int16 with quantized=True
-    wl.load(words)                                # write + verify + commit, ~10 ms
+    wl.load(words)                                # write + verify + commit
 
 Network / memory layout (must match inference_chip_control.sv):
-    6H -> 128 (ReLU) -> 128 (ReLU) -> 1, 16-bit fixed point with FRAC_W fractional
-    bits, H = observation history (OBS_HISTORY in board_top, obs_history_len in sim).
+    6H -> H1 (ReLU) -> H2 (ReLU) -> 1, 16-bit fixed point with FRAC_W fractional
+    bits. H = observation history (OBS_HISTORY), H1/H2 = hidden widths (HIDDEN1/
+    HIDDEN2 in board_top, net-arch in config.json; multiples of 4).
     Each layer is stored per tile of 4 output neurons: one bias word, then one word
     per input column. A 64-bit word holds lanes {n3, n2, n1, n0}, lane k = neuron 4r+k
     in bits [16k+15:16k]. Layer 3 is padded to 4 neurons (only lane 0 is used).
-    Layer bases: L1 = 0 (32 x (6H+1)), L2 = 32(6H+1) (32 x 129), L3 = L2 + 4128 (129)
-    -> words_used(H) = 32(6H+1) + 4257   (H = 1: 4481, H = 4: 5057).
+    words = H1/4 (6H+1) + H2/4 (H1+1) + (H2+1)      (6-128-128-1: 4481)
+    Banks larger than the 8192-word AXI window are written page by page (WPAGE).
 
 Input column order seen by layer 1: H frames, oldest first, each frame in
     HW_INPUT_ORDER = (s1_pos, s2_sin, s2_cos, s1_vel, s2_vel, F_prev)
@@ -45,33 +47,55 @@ WEIGHT_BASE = 0x8004_0000          # set by scripts/add_weight_axi_port.tcl
 WEIGHT_RANGE = 0x2_0000
 REG_CTRL = 0x1_0000                # W: bit0 commit / R: status
 REG_ID = 0x1_0004
-REG_WORDS = 0x1_0008
-ID_VALUE = 0x57E1_0002
+REG_WORDS = 0x1_0008               # [23:0] words used, [31:24] log2(bank words)
+REG_CONFIG = 0x1_0020              # [7:0] obs history, [15:8] action smooth window, [31:16] mrad/s
+REG_CONFIG2 = 0x1_0024             # [15:0] policy rate in Hz
+REG_WPAGE = 0x1_0028               # weight window page
+REG_NET = 0x1_002C                 # [11:0] hidden 1, [23:12] hidden 2
+ID_VALUE = 0x57E1_0004
+PAGE_WORDS = 8192                  # 64-bit words per 64 KB weight window
 
 FRAC_W = 9                         # inference_chip FRAC_W (top_pipeline parameter)
 FRAME = 6                          # features per observation frame
-HIDDEN = 128
 HW_INPUT_ORDER = ("s1_pos", "s2_sin", "s2_cos", "s1_vel", "s2_vel", "F_prev")
 NUM_PE = 4
 
 
-def layer_sizes(obs_history: int = 1) -> tuple[int, int, int, int]:
-    return (FRAME * obs_history, HIDDEN, HIDDEN, 1)
+@dataclass(frozen=True)
+class NetShape:
+    """6*obs_history -> hidden1 -> hidden2 -> 1."""
+    obs_history: int = 1
+    hidden1: int = 128
+    hidden2: int = 128
+
+    @property
+    def inputs(self) -> int:
+        return FRAME * self.obs_history
+
+    @property
+    def sizes(self) -> tuple[int, int, int, int]:
+        return (self.inputs, self.hidden1, self.hidden2, 1)
+
+    @property
+    def words(self) -> int:
+        return (self.hidden1 // 4) * (self.inputs + 1) + (self.hidden2 // 4) * (self.hidden1 + 1) \
+            + (self.hidden2 + 1)
+
+    def validate(self) -> "NetShape":
+        if self.obs_history < 1 or self.hidden1 < 4 or self.hidden2 < 4 \
+                or self.hidden1 % 4 or self.hidden2 % 4:
+            raise ValueError(f"invalid network shape {self} (hidden widths: multiples of 4)")
+        return self
+
+    def __str__(self) -> str:
+        return f"{self.inputs}-{self.hidden1}-{self.hidden2}-1 (obs history {self.obs_history})"
 
 
-def words_used(obs_history: int = 1) -> int:
-    return 32 * (FRAME * obs_history + 1) + 32 * (HIDDEN + 1) + (HIDDEN + 1)
+def words_used(obs_history: int = 1, hidden1: int = 128, hidden2: int = 128) -> int:
+    return NetShape(obs_history, hidden1, hidden2).words
 
 
-def history_from_words(n_words: int) -> int:
-    """Observation history H of a weight image / of the PL (from its word count)."""
-    in_f = (n_words - 32 * (HIDDEN + 1) - (HIDDEN + 1)) // 32 - 1
-    if in_f < FRAME or in_f % FRAME or words_used(in_f // FRAME) != n_words:
-        raise ValueError(f"{n_words} words is not a valid 6H-128-128-1 image")
-    return in_f // FRAME
-
-
-WORDS_USED = words_used(1)         # H = 1 (kept for older callers)
+WORDS_USED = words_used()          # default 6-128-128-1 (kept for older callers)
 
 
 # ----------------------------------------------------------------------------- fixed point
@@ -112,12 +136,23 @@ def _pack_layer(W: np.ndarray, b: np.ndarray) -> np.ndarray:
     return _pack_lanes(np.concatenate([bt, Wt], axis=1)).reshape(-1)
 
 
+def shape_of(W1, W2, W3) -> NetShape:
+    """Network shape from torch-layout weight matrices."""
+    in_f, h1, h2 = np.shape(W1)[1], np.shape(W1)[0], np.shape(W2)[0]
+    if in_f % FRAME:
+        raise ValueError(f"W1 has {in_f} inputs, expected a multiple of {FRAME}")
+    shape = NetShape(in_f // FRAME, h1, h2).validate()
+    if np.shape(W2)[1] != h1 or tuple(np.shape(W3)) != (1, h2):
+        raise ValueError(f"inconsistent layer shapes W1{np.shape(W1)} W2{np.shape(W2)} W3{np.shape(W3)}")
+    return shape
+
+
 def pack_weights(W1, b1, W2, b2, W3, b3, *, frac: int = FRAC_W, quantized: bool = False,
                  input_perm=None) -> np.ndarray:
-    """Pack one actor network into the PL weight-RAM image (uint64[words_used(H)]).
+    """Pack one actor network into the PL weight-RAM image (uint64[shape.words]).
 
-    W* use the torch nn.Linear layout (out_features, in_features); W1 has 6*H
-    columns (H stacked frames, oldest first), which sets H.
+    W* use the torch nn.Linear layout (out_features, in_features). The shape is
+    taken from the matrices: W1 (H1, 6H), W2 (H2, H1), W3 (1, H2).
     quantized=False: arrays are floats, quantized here with `frac` fractional bits.
     quantized=True : arrays are already integer codes (int16 range).
     input_perm: per-frame index list so that a frame reordered by it is in
@@ -126,38 +161,33 @@ def pack_weights(W1, b1, W2, b2, W3, b3, *, frac: int = FRAC_W, quantized: bool 
                 Applied to every frame.
     """
     params = [np.asarray(p) for p in (W1, b1, W2, b2, W3, b3)]
-    in_f = params[0].shape[1]
-    if in_f % FRAME:
-        raise ValueError(f"W1 has {in_f} inputs, expected a multiple of {FRAME}")
-    hist = in_f // FRAME
+    shape = shape_of(params[0], params[2], params[4])
+    for name, b, n in (("b1", params[1], shape.hidden1), ("b2", params[3], shape.hidden2), ("b3", params[5], 1)):
+        if b.shape != (n,):
+            raise ValueError(f"{name}: expected ({n},), got {b.shape}")
     if input_perm is not None:
-        perm = np.concatenate([np.asarray(input_perm) + FRAME * f for f in range(hist)])
+        perm = np.concatenate([np.asarray(input_perm) + FRAME * f for f in range(shape.obs_history)])
         params[0] = params[0][:, perm]
     if quantized:
         params = [np.clip(np.round(p), -32768, 32767).astype(np.int16) for p in params]
     else:
         params = [quantize(p, frac) for p in params]
     W1, b1, W2, b2, W3, b3 = params
-
-    sizes = layer_sizes(hist)
-    expect = [(sizes[i + 1], sizes[i]) for i in range(3)]
-    for name, W, b, shp in (("W1", W1, b1, expect[0]), ("W2", W2, b2, expect[1]), ("W3", W3, b3, expect[2])):
-        if W.shape != shp or b.shape != (shp[0],):
-            raise ValueError(f"{name}: expected W{shp} b({shp[0]},), got W{W.shape} b{b.shape}")
-
     words = np.concatenate([_pack_layer(W1, b1), _pack_layer(W2, b2), _pack_layer(W3, b3)])
-    assert words.size == words_used(hist)
+    assert words.size == shape.words
     return words
 
 
-def unpack_weights(words, obs_history: int | None = None) -> tuple[np.ndarray, ...]:
+def unpack_weights(words, shape: NetShape | None = None) -> tuple[np.ndarray, ...]:
     """Inverse of pack_weights (int16 codes): W1, b1, W2, b2, W3, b3 in torch layout.
-    obs_history=None: taken from the image length."""
+    shape=None: 128-128 hidden layers, history from the image length."""
     words = np.asarray(words, dtype=np.uint64)
-    if obs_history is None:
-        obs_history = history_from_words(words.size)
-    words = words[:words_used(obs_history)]
-    sizes = layer_sizes(obs_history)
+    if shape is None:
+        shape = default_shape_from_words(words.size)
+    if words.size < shape.words:
+        raise ValueError(f"{words.size} words, network {shape} needs {shape.words}")
+    words = words[:shape.words]
+    sizes = shape.sizes
     out, pos = [], 0
     for i in range(3):
         in_f, out_f = sizes[i], sizes[i + 1]
@@ -169,6 +199,16 @@ def unpack_weights(words, obs_history: int | None = None) -> tuple[np.ndarray, .
         W = blk[:, 1:, :].transpose(0, 2, 1).reshape(-1, in_f)[:out_f]
         out += [W, b]
     return tuple(out)
+
+
+def default_shape_from_words(n_words: int, hidden1: int = 128, hidden2: int = 128) -> NetShape:
+    """Observation history of an image with the given hidden widths (from its length)."""
+    rest = n_words - (hidden2 // 4) * (hidden1 + 1) - (hidden2 + 1)
+    in_f = rest // (hidden1 // 4) - 1
+    shape = NetShape(max(1, in_f // FRAME), hidden1, hidden2)
+    if in_f < FRAME or in_f % FRAME or shape.words != n_words:
+        raise ValueError(f"{n_words} words is not a 6H-{hidden1}-{hidden2}-1 image; pass shape=")
+    return shape
 
 
 def load_mem_file(path) -> np.ndarray:
@@ -191,16 +231,17 @@ def _wrap32(x: np.ndarray) -> np.ndarray:
     return ((x + (1 << 31)) % (1 << 32)) - (1 << 31)
 
 
-def reference_forward(words, obs, frac: int = FRAC_W) -> np.ndarray:
+def reference_forward(words, obs, frac: int = FRAC_W, shape: NetShape | None = None) -> np.ndarray:
     """Bit-exact model of inference_chip (IO_FRAC == FRAC_W).
 
     obs: int16 codes, shape (6H,) or (N, 6H): H frames oldest first, each in
-         HW_INPUT_ORDER (H from the image length).
+         HW_INPUT_ORDER.
+    shape: network shape (None: 128-128 hidden, history from the image length).
     returns: int16 inference_result, shape () or (N,).
     Per layer: acc = (bias << frac) + sum(a * w)  (32-bit wrap-around accumulator),
                out = sat16(acc >> frac), ReLU (acc < 0 -> 0) on layers 1 and 2.
     """
-    W1, b1, W2, b2, W3, b3 = (p.astype(np.int64) for p in unpack_weights(words))
+    W1, b1, W2, b2, W3, b3 = (p.astype(np.int64) for p in unpack_weights(words, shape))
     a = np.atleast_2d(np.asarray(obs, dtype=np.int64))
     for W, b, relu in ((W1, b1, True), (W2, b2, True), (W3, b3, False)):
         acc = _wrap32((b << frac)[None, :] + a @ W.T)
@@ -231,7 +272,9 @@ def actor_float_params(actor, param_noise_std: float = 0.0, rng=None) -> tuple[n
     out = []
     with th.no_grad():
         for lin in lins:
-            if getattr(lin, "quant_on", False) and hasattr(lin, "integer_params")                     and lin.cfg.weight_bits is not None:
+            quant = (getattr(lin, "quant_on", False) and hasattr(lin, "integer_params")
+                     and lin.cfg.weight_bits is not None)
+            if quant:
                 w_int, w_s, b_int, b_s = lin.integer_params()
                 w = (w_int * w_s).cpu().numpy()
                 b = (b_int * b_s).cpu().numpy() if b_int is not None else lin.bias.cpu().numpy()
@@ -264,10 +307,6 @@ def actor_to_pl_words(actor, param_noise_std: float = 0.0, rng=None, frac: int =
 
 
 # ----------------------------------------------------------------------------- PL driver
-REG_CONFIG = 0x1_0020              # [7:0] obs history, [15:8] action smooth window, [31:16] mrad/s
-REG_CONFIG2 = 0x1_0024             # [15:0] policy rate in Hz
-
-
 @dataclass(frozen=True)
 class PLConfig:
     """Policy settings baked into the bitstream (board_top localparams). They
@@ -276,26 +315,38 @@ class PLConfig:
     action_smooth_window: int      # action_smooth_window
     max_velocity_rad_s: float      # max_velocity_rad_s
     control_freq_hz: float         # control_freq_hz
+    hidden1: int                   # net-arch[0]
+    hidden2: int                   # net-arch[1]
+
+    @property
+    def shape(self) -> NetShape:
+        return NetShape(self.obs_history, self.hidden1, self.hidden2)
 
     def mismatches(self, cfg: dict) -> list[str]:
         """Human-readable differences to a training config.json (keys absent
-        from the config fall back to the pendulum_env defaults)."""
+        from the config fall back to the pendulum_env / train_sac defaults)."""
         want = {
             "obs_history_len": (int(cfg.get("obs_history_len", 4)), self.obs_history),
             "action_smooth_window": (int(cfg.get("action_smooth_window", 4)), self.action_smooth_window),
             "max_velocity_rad_s": (float(cfg.get("max_velocity_rad_s", 5.0)), self.max_velocity_rad_s),
             "control_freq_hz": (float(cfg.get("control_freq_hz", 50.0)), self.control_freq_hz),
         }
-        return [f"{k}: checkpoint {c:g}, PL {p:g}" for k, (c, p) in want.items()
-                if abs(float(c) - float(p)) > 1e-3]
+        out = [f"{k}: checkpoint {c:g}, PL {p:g}" for k, (c, p) in want.items()
+               if abs(float(c) - float(p)) > 1e-3]
+        arch = [int(x) for x in cfg.get("net-arch", [256, 256])]
+        if arch != [self.hidden1, self.hidden2]:
+            out.append(f"net-arch: checkpoint {arch}, PL [{self.hidden1}, {self.hidden2}]")
+        return out
 
 
 def read_pl_config(mmio) -> PLConfig:
     c = mmio.read(REG_CONFIG)
     c2 = mmio.read(REG_CONFIG2)
+    net = mmio.read(REG_NET)
     return PLConfig(obs_history=c & 0xFF, action_smooth_window=(c >> 8) & 0xFF,
                     max_velocity_rad_s=((c >> 16) & 0xFFFF) / 1000.0,
-                    control_freq_hz=float(c2 & 0xFFFF))
+                    control_freq_hz=float(c2 & 0xFFFF),
+                    hidden1=net & 0xFFF, hidden2=(net >> 12) & 0xFFF)
 
 
 @dataclass
@@ -317,16 +368,17 @@ class WeightLoader:
         self.mmio = mmio
         ident = self.mmio.read(REG_ID)
         if ident != ID_VALUE:
-            raise RuntimeError(f"weight_loader_axi not found at {base_addr:#x} (ID={ident:#x}). "
-                               "Is the right bitstream loaded?")
+            raise RuntimeError(f"weight_loader_axi ID {ident:#x} at {base_addr:#x}, driver expects "
+                               f"{ID_VALUE:#x}. Is the current bitstream loaded?")
         words = self.mmio.read(REG_WORDS)
-        self.words_used = words & 0xFFFF
-        self.bank_words = words >> 16
+        self.words_used = words & 0xFFFFFF
+        self.bank_words = 1 << (words >> 24)
         self.config = read_pl_config(self.mmio)
-        if history_from_words(self.words_used) != self.config.obs_history:
-            raise RuntimeError(f"PL reports {self.words_used} words but obs history "
-                               f"{self.config.obs_history}")
-        self.obs_history = self.config.obs_history
+        self.shape = self.config.shape
+        if self.shape.words != self.words_used:
+            raise RuntimeError(f"PL reports {self.words_used} weight words, network {self.shape} "
+                               f"needs {self.shape.words}")
+        self.obs_history = self.shape.obs_history
 
     def status(self) -> WeightStatus:
         s = self.mmio.read(REG_CTRL)
@@ -343,20 +395,28 @@ class WeightLoader:
                 raise TimeoutError("weight commit still pending (inference engine never idle?)")
 
     def write_shadow(self, words: np.ndarray, timeout: float = 0.1) -> None:
-        """Write the full image into the inactive bank."""
+        """Write the full image into the inactive bank (page by page)."""
         words = np.ascontiguousarray(words, dtype="<u8")
         if words.size > self.bank_words:
             raise ValueError("image larger than a bank")
         st = self._wait_not_pending(timeout)
-        u32 = words.view("<u4")                          # word n -> 8n (low), 8n+4 (high)
-        self.mmio.array[0:u32.size] = u32
+        for page, start in enumerate(range(0, words.size, PAGE_WORDS)):
+            self.mmio.write(REG_WPAGE, page)
+            u32 = words[start:start + PAGE_WORDS].view("<u4")   # word n -> 8n (low), 8n+4 (high)
+            self.mmio.array[0:u32.size] = u32
+        self.mmio.write(REG_WPAGE, 0)
         if self.status().dropped_writes != st.dropped_writes:
             raise RuntimeError("PL dropped weight writes (commit raced the upload)")
 
     def read_shadow(self, n: int | None = None) -> np.ndarray:
         n = self.words_used if n is None else n
-        u32 = np.array(self.mmio.array[0:2 * n], dtype="<u4")
-        return u32.view("<u8").copy()
+        out = np.empty(n, dtype="<u8")
+        for page, start in enumerate(range(0, n, PAGE_WORDS)):
+            k = min(PAGE_WORDS, n - start)
+            self.mmio.write(REG_WPAGE, page)
+            out[start:start + k] = np.array(self.mmio.array[0:2 * k], dtype="<u4").view("<u8")
+        self.mmio.write(REG_WPAGE, 0)
+        return out
 
     def commit(self, timeout: float = 0.1) -> WeightStatus:
         """Make the shadow bank active (takes effect between two inferences)."""
@@ -371,9 +431,8 @@ class WeightLoader:
         """write shadow -> (read back + compare) -> commit."""
         words = np.asarray(words, dtype=np.uint64)
         if words.size != self.words_used:
-            raise ValueError(f"image has {words.size} words (obs history "
-                             f"{history_from_words(words.size)}), the PL network needs "
-                             f"{self.words_used} (obs history {self.obs_history})")
+            raise ValueError(f"image has {words.size} words, the PL network {self.shape} "
+                             f"needs {self.words_used}")
         self.write_shadow(words, timeout)
         if verify:
             back = self.read_shadow(words.size)
@@ -384,17 +443,18 @@ class WeightLoader:
 
 
 # ----------------------------------------------------------------------------- self test (off-board)
-def _selftest(mem_path: str, vectors_path: str | None = None, n: int = 64) -> None:
+def _selftest(mem_path: str, vectors_path: str | None = None, n: int = 64,
+              shape: NetShape | None = None) -> None:
     words = load_mem_file(mem_path)
-    hist = history_from_words(words.size)
-    params = unpack_weights(words)
+    shape = shape or default_shape_from_words(words.size)
+    params = unpack_weights(words, shape)
     repacked = pack_weights(*params, quantized=True)
     assert np.array_equal(repacked, words), "pack(unpack(mem)) != mem"
-    print(f"pack/unpack round trip OK ({words.size} words, obs history {hist})")
+    print(f"pack/unpack round trip OK ({words.size} words, network {shape})")
 
     rng = np.random.default_rng(0)
-    obs = rng.integers(-2 << FRAC_W, 2 << FRAC_W, size=(n, FRAME * hist)).astype(np.int16)
-    res = reference_forward(words, obs)
+    obs = rng.integers(-2 << FRAC_W, 2 << FRAC_W, size=(n, shape.inputs)).astype(np.int16)
+    res = reference_forward(words, obs, shape=shape)
     print("reference outputs (first 8):", res[:8])
     if vectors_path:
         with open(vectors_path, "w") as f:
@@ -408,5 +468,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="weight packer self test (runs without PYNQ)")
     ap.add_argument("mem", help="unified_weights.mem")
     ap.add_argument("--vectors", help="write obs/expected-output vectors for an RTL testbench")
+    ap.add_argument("--history", type=int, default=None)
+    ap.add_argument("--hidden", type=int, nargs=2, default=None, metavar=("H1", "H2"))
     args = ap.parse_args()
-    _selftest(args.mem, args.vectors)
+    shp = None
+    if args.history is not None or args.hidden is not None:
+        h1, h2 = args.hidden or (128, 128)
+        shp = NetShape(args.history or 1, h1, h2)
+    _selftest(args.mem, args.vectors, shape=shp)
