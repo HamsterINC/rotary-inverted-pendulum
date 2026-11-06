@@ -8,11 +8,22 @@ Behaviour matches the C firmware (ll_poll / handle_set_accel):
   * accel commands are ignored while disengaged
   * tare waits for the PL to apply it before returning
   * state is returned with the server's output sign flip (optional)
+  * every state read carries the PL cycle stamp of its sample (sample_cyc) and
+    is checked for tearing (re-read if a new sample landed mid-read)
+  * loop timing (optional): after every accel strobe the PL latches the
+    action->action period and the action cycle stamp (axi_gpio_meas), so the
+    delay is measured from the sample the caller actually used; see
+    LoopTiming / timing_log
+  * wait_for_sample(): sleep-then-spin wait for a PL sample, so a control
+    loop can run locked to the 500 Hz sample clock
+  * enter_realtime(): optional core pinning / SCHED_FIFO for the control thread
 """
 
 from __future__ import annotations
 
+import gc
 import math
+import os
 import struct
 import threading
 import time
@@ -36,6 +47,14 @@ BRAKE_ACCEL      = 150.0                 # rad/s^2
 ACCEL_FULL_SCALE = 150.0                 # rad/s^2 at action = 1.0
 TARE_SETTLE_S    = 0.005                 # > one 2 ms sample + pipeline
 
+# PL sample clock (training_pipeline SAMPLE_HZ); time_us steps by this per sample
+SAMPLE_HZ        = 500
+SAMPLE_PERIOD_US = 1_000_000 // SAMPLE_HZ
+
+# Loop-timing GPIO fields (must match training_pipeline.sv)
+MEAS_CNT_BITS = 24
+MEAS_CNT_MAX  = (1 << MEAS_CNT_BITS) - 1   # saturated = first action after reset/idle
+
 
 def _to_int16(val: int) -> int:
     """Interpret an unsigned 16-bit register readout as signed."""
@@ -46,6 +65,10 @@ def _to_int32(val: int) -> int:
     """Interpret an unsigned 32-bit register readout as signed."""
     val &= 0xFFFFFFFF
     return val - 0x100000000 if val & 0x80000000 else val
+
+def us_diff(a: int, b: int) -> int:
+    """a - b for 32-bit wrapping PL microsecond stamps (signed result)."""
+    return ((int(a) - int(b) + 0x80000000) & 0xFFFFFFFF) - 0x80000000
 
 def _to_uint16(val: int) -> int:
     """Pack a signed 16-bit integer into an unsigned 16-bit word."""
@@ -68,6 +91,71 @@ class LowLevelState(NamedTuple):
     pendulum_pos_rad: float
     motor_vel_rad_s: float
     pendulum_vel_rad_s: float
+    sample_cyc: int | None = None   # PL cycle stamp of this sample (None: old bitstream)
+
+
+class LoopTiming(NamedTuple):
+    """One PL measurement, latched at an accel strobe (units: PL clock cycles).
+
+    period_cycles : previous action -> this action (loop period)
+    delay_cycles  : sample used for this action -> this action, where "used"
+                    is the last state returned by get_state()/step() before
+                    the action (-1 if unknown)
+    n_samples     : samples published since the previous action
+                    (0: no new state since last action, 1: normal, >1: overrun)
+    action_cyc    : PL cycle stamp of this action (low 24 bits)
+    sample_cyc    : PL cycle stamp of the used sample (None if unknown)
+    """
+    seq: int
+    period_cycles: int
+    delay_cycles: int
+    n_samples: int
+    action_cyc: int
+    sample_cyc: int | None
+    clock_hz: float
+
+    @property
+    def period_s(self) -> float:
+        return self.period_cycles / self.clock_hz
+
+    @property
+    def delay_s(self) -> float:
+        return self.delay_cycles / self.clock_hz if self.delay_cycles >= 0 else float("nan")
+
+    @property
+    def saturated(self) -> bool:
+        """True when the period overflowed (first action after reset or a long pause)."""
+        return self.period_cycles >= MEAS_CNT_MAX
+
+
+def enter_realtime(cpu: int | None = None, priority: int = 50, freeze_gc: bool = True) -> dict:
+    """Best-effort soft-real-time setup for the CALLING thread (Linux only).
+
+    cpu       : pin this thread to one core (None: leave affinity alone)
+    priority  : SCHED_FIFO priority 1..99 (0: keep the normal scheduler);
+                needs root / CAP_SYS_NICE, otherwise skipped
+    freeze_gc : gc.freeze() so existing objects are never rescanned
+                (garbage collection stays on)
+    Returns what was applied; failures are reported, never raised.
+    """
+    done = {"cpu": None, "fifo": None, "gc_frozen": False}
+    if cpu is not None and hasattr(os, "sched_setaffinity"):
+        try:
+            os.sched_setaffinity(0, {int(cpu)})      # pid 0 = calling thread on Linux
+            done["cpu"] = int(cpu)
+        except OSError as e:
+            print(f"  [rt] could not pin to CPU {cpu}: {e}")
+    if priority > 0 and hasattr(os, "sched_setscheduler"):
+        try:
+            os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(int(priority)))
+            done["fifo"] = int(priority)
+        except OSError as e:
+            print(f"  [rt] SCHED_FIFO {priority} not applied ({e}); run as root for it")
+    if freeze_gc:
+        gc.collect()
+        gc.freeze()
+        done["gc_frozen"] = True
+    return done
 
 
 class FpgaLowLevelClient:
@@ -82,6 +170,7 @@ class FpgaLowLevelClient:
         accel_frac_bits: int = 9,    # Q8.8  normalised action
         flip_sign: bool = True,      # match LowLevelServer::sendState() output flip
         safety: bool = True,         # NaN guard, clamp and rail brake
+        measure_timing: bool = True, # read axi_gpio_meas after every accel strobe
         port: str | None = None,     # compatibility shim
         baud: int | None = None,     # compatibility shim
     ):
@@ -109,6 +198,24 @@ class FpgaLowLevelClient:
             raise KeyError(
                 f"Missing expected AXI GPIO IP: {err}. Discovered blocks: {available}"
             ) from err
+
+        # Optional: older bitstreams have no measurement GPIO / sample stamp.
+        self.gpio_meas = None
+        if "axi_gpio_meas" in self.ol.ip_dict:
+            self.gpio_meas = MMIO(self.ol.ip_dict["axi_gpio_meas"]["phys_addr"], 0x1000)
+        elif measure_timing:
+            print("  axi_gpio_meas not in overlay; loop-timing measurement disabled")
+        timing_params = self.ol.ip_dict["axi_gpio_timing"].get("parameters", {}) or {}
+        self._has_sample_cyc = (self.gpio_meas is not None
+                                or str(timing_params.get("C_IS_DUAL", "0")) == "1")
+        self.measure_timing = bool(measure_timing and self.gpio_meas is not None)
+        self.timing_log: list[LoopTiming] = []   # valid (non-saturated) measurements
+        self.last_timing: LoopTiming | None = None
+        self._last_seq: int | None = None
+        self._skip_next = True
+        self._used_sample_cyc: int | None = None  # stamp of the last state handed out
+        self._sync_ref: tuple[float, int] | None = None  # (perf_counter, time_us) pair
+        self.n_torn_reads = 0                     # state reads retried for tearing
 
         self.gpio_step = MMIO(gpio_step_addr, 0x1000)
         self.gpio_pen  = MMIO(gpio_pen_addr,  0x1000)
@@ -142,8 +249,28 @@ class FpgaLowLevelClient:
         t  = _to_int32(self.gpio_timing.read(GPIO_CH1_DATA_OFFSET))
         return mp, pp, mv, pv, t
 
+    def _hal_read_stamp(self) -> tuple[int, int | None]:
+        """(time_us, sample_cyc) of the sample currently on the GPIOs."""
+        t = _to_int32(self.gpio_timing.read(GPIO_CH1_DATA_OFFSET))
+        c = (self.gpio_timing.read(GPIO_CH2_DATA_OFFSET) & 0xFFFFFFFF
+             if self._has_sample_cyc else None)
+        return t, c
+
     def _hal_read_state(self) -> LowLevelState:
-        mp, pp, mv, pv, t = self._hal_read_raw()
+        """Read one consistent sample: stamp, data, stamp again; retry if a
+        new sample was published in between (the PL updates every 2 ms)."""
+        for _ in range(4):
+            stamp0 = self._hal_read_stamp()
+            mp = _to_int16(self.gpio_step.read(GPIO_CH1_DATA_OFFSET))
+            mv = _to_int16(self.gpio_step.read(GPIO_CH2_DATA_OFFSET))
+            pp = _to_int16(self.gpio_pen.read(GPIO_CH1_DATA_OFFSET))
+            pv = _to_int16(self.gpio_pen.read(GPIO_CH2_DATA_OFFSET))
+            stamp1 = self._hal_read_stamp()
+            if stamp0 == stamp1:
+                break
+            self.n_torn_reads += 1
+        t, c = stamp1
+        self._used_sample_cyc = c
         s = -1.0 if self.flip_sign else 1.0
         return LowLevelState(
             time_us=t,
@@ -151,8 +278,41 @@ class FpgaLowLevelClient:
             pendulum_pos_rad=s * q16_to_float(pp, self.pos_frac_bits),
             motor_vel_rad_s=s * q16_to_float(mv, self.vel_frac_bits),
             pendulum_vel_rad_s=s * q16_to_float(pv, self.vel_frac_bits),
-
+            sample_cyc=c,
         )
+
+    def _hal_read_timing(self, used_sample_cyc: int | None = None) -> LoopTiming:
+        period = self.gpio_meas.read(GPIO_CH1_DATA_OFFSET) & 0xFFFFFFFF
+        action = self.gpio_meas.read(GPIO_CH2_DATA_OFFSET) & 0xFFFFFFFF
+        action_cyc = action & MEAS_CNT_MAX
+        delay = (-1 if used_sample_cyc is None
+                 else (action_cyc - used_sample_cyc) & MEAS_CNT_MAX)
+        return LoopTiming(
+            seq=(period >> MEAS_CNT_BITS) & 0xFF,
+            period_cycles=period & MEAS_CNT_MAX,
+            delay_cycles=delay,
+            n_samples=(action >> MEAS_CNT_BITS) & 0xFF,
+            action_cyc=action_cyc,
+            sample_cyc=used_sample_cyc,
+            clock_hz=self.clock_frequency,
+        )
+
+    def _record_timing(self) -> None:
+        """Fetch the measurement latched by the strobe just sent and log it."""
+        used = self._used_sample_cyc
+        m = self._hal_read_timing(used)
+        if m.seq == self._last_seq:
+            # The read overtook the strobe write on the bus; read once more.
+            m = self._hal_read_timing(used)
+            if m.seq == self._last_seq:
+                return
+        self._last_seq = m.seq
+        self.last_timing = m
+        if self._skip_next:
+            # this period spans a pause (engage / log clear), not a loop step
+            self._skip_next = False
+        elif not m.saturated:
+            self.timing_log.append(m)
 
     def _hal_write_accel_raw(self, accel_q: int) -> None:
         """Write an already-quantised Q8.8 value to ctrl ch2 (no strobe)."""
@@ -192,6 +352,8 @@ class FpgaLowLevelClient:
         accel_q = float_to_q16(a / ACCEL_FULL_SCALE, self.accel_frac_bits)
         self._hal_write_accel_raw(accel_q)
         self._pulse(CTRL_ACCEL_STB)    # data write is ordered before the strobe
+        if self.measure_timing:
+            self._record_timing()
         return True
 
     # ------------------------------------------------------------------
@@ -212,9 +374,70 @@ class FpgaLowLevelClient:
             self._apply_accel(accel)
             return self._hal_read_state()
 
+    def get_timing(self) -> LoopTiming | None:
+        """Read the PL loop-timing registers now (None if not available)."""
+        if self.gpio_meas is None:
+            return None
+        with self._lock:
+            return self._hal_read_timing(self._used_sample_cyc)
+
+    def read_time_us(self) -> int:
+        """PL time stamp (us) of the newest published sample."""
+        return _to_int32(self.gpio_timing.read(GPIO_CH1_DATA_OFFSET))
+
+    def wait_for_sample(self, target_time_us: int, *, spin_s: float = 0.001,
+                        timeout_s: float = 0.1) -> int:
+        """Block until the PL publishes the sample stamped target_time_us
+        (half a sample period of tolerance) or a later one; returns the
+        time_us seen. Returns at once if it is already there (caller is late).
+
+        Sleeps until ~spin_s before the sample is due, then busy-polls the
+        time_us register, so the wake-up error of time.sleep is absorbed and
+        the sample is seen within a few microseconds. The PL<->perf_counter
+        offset is learnt from the last sample edge seen while spinning.
+        Raises TimeoutError (an OSError) if no such sample arrives in time.
+        Does not take the client lock, so disengage from another thread is
+        never blocked.
+        """
+        tol = SAMPLE_PERIOD_US // 2
+        t = self.read_time_us()
+        remaining_us = us_diff(target_time_us, t)
+        if remaining_us <= tol:
+            return t
+        now = time.perf_counter()
+        if self._sync_ref is not None:
+            perf_ref, t_ref = self._sync_ref
+            due = perf_ref + us_diff(target_time_us, t_ref) * 1e-6
+        else:
+            # the newest sample may already be up to one period old
+            due = now + (remaining_us - SAMPLE_PERIOD_US) * 1e-6
+        if due - spin_s > now:
+            time.sleep(due - spin_s - now)
+        hard_deadline = now + remaining_us * 1e-6 + timeout_s
+        saw_old = False
+        while True:
+            t = self.read_time_us()
+            if us_diff(t, target_time_us) >= -tol:
+                if saw_old:
+                    self._sync_ref = (time.perf_counter(), t)
+                return t
+            saw_old = True
+            if time.perf_counter() > hard_deadline:
+                raise TimeoutError(
+                    f"no PL sample at time_us={target_time_us} (newest {t}); "
+                    "is the PL running?")
+
+    def clear_timing_log(self) -> None:
+        """Drop logged measurements. The next action's period is dropped too,
+        since it spans the pause before it."""
+        with self._lock:
+            self.timing_log.clear()
+            self._skip_next = True
+
     def engage_motor(self) -> None:
         with self._lock:
             self._engaged = True
+            self._skip_next = True        # first period after engage spans the pause
             self._hal_write_accel_raw(0)
             self._hal_write_ctrl(self._ctrl_state | CTRL_ENGAGE)
 

@@ -44,9 +44,11 @@ Settings baked into the bitstream (board_top localparams) and checked against
 config.json when the env opens the rig: control_freq_hz, obs_history_len,
 action_smooth_window (PL boxcar on the actuator), max_velocity_rad_s.
 
-Differences from the sim the policy should know about (reported, not fixed):
-    - the PL applies clamp(mu, -1, 1); SAC's deterministic action is tanh(mu),
-    - prev_act is the PL's raw (unclipped) last output.
+Action the PL applies:
+    - SAC-head bitstream (client.weights.has_sac_head): tanh(mu) with
+      exploration off, tanh(mu + std*eps) with client.set_explore(True), the
+      same as SAC's deterministic / stochastic action; prev_act is that action.
+    - legacy bitstream: clamp(mu, -1, 1), prev_act the raw (unclipped) output.
 """
 
 from __future__ import annotations

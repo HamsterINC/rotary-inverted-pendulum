@@ -3,7 +3,7 @@ or on the PL, selected with --inference. Everything else is shared, so the two
 deployment methods can be compared one-to-one.
 
     python finetune_async.py runs/<run> --inference cpu --port /dev/ttyPS1 --episodes 50
-    python finetune_async.py runs/<run> --inference pl  --param-noise 0.01 --episodes 50
+    python finetune_async.py runs/<run> --inference pl  --episodes 50
 
 Threads (same for both modes):
 
@@ -43,9 +43,18 @@ Policy sync (--weight-sync):
 
 Exploration:
     cpu: stochastic SAC actions (unless --deterministic) + dt jitter.
-    pl : the PL policy is deterministic -> --param-noise (Gaussian noise on the
-         uploaded weights, one draw per episode, also across mid-episode
-         uploads; the learner's actor stays clean).
+    pl (--pl-explore):
+      sac   (default) the PL samples SAC's own stochastic action
+            tanh(mu + exp(log_std) * eps) with its LFSR noise generator
+            (sac_policy_head; the uploaded weights carry the log_std head).
+            Training episodes explore, eval episodes run tanh(mu). The noise
+            generator is reseeded per episode from (--seed, episode).
+            Needs the SAC-head bitstream (ID 0x57E1_0005); on an older one the
+            episodes run deterministically, with a warning.
+      param Gaussian noise on the uploaded weights (--param-noise, one draw per
+            episode, also across mid-episode uploads; the learner's actor
+            stays clean). Chosen automatically when --param-noise > 0.
+      none  deterministic tanh(mu) / clamp(mu) every episode.
 
 Update-to-data ratio: the learner trains whenever it can, also during homing
 and rest waits, so gradient steps per real transition depend on how long those
@@ -95,8 +104,8 @@ coefficient. Buffers are portable .npy directories (Training/portable_buffer.py)
 Fine-tuning metrics (finetune_metrics.py):
     Every --eval-every'th episode (the 1st, then every Nth after it) runs the
     policy DETERMINISTICALLY with fixed weights — the way it will be deployed
-    (cpu: deterministic actions, --eval-dt-jitter-frac; pl: no parameter
-    noise). Its transitions still go into the replay buffer. The first eval
+    (cpu: deterministic actions, --eval-dt-jitter-frac; pl: exploration off,
+    no parameter noise). Its transitions still go into the replay buffer. The first eval
     runs before any real-data gradient step, giving the sim-only baseline.
 
     Per episode: balanced, time_to_balance_s, frac_upright,
@@ -458,6 +467,7 @@ def _pl_rig_worker(env, sync: PolicySync, latest: LatestWeights | None,
     """PL inference: reset (home, tare check, upload newest weights) then
     observe the PL episode; with `latest` (continuous sync) newer weights are
     uploaded between steps. Transitions arrive with the episode."""
+    warned = {"no_sac": False}
     try:
         for ep_i in range(n_episodes):
             if stop.is_set():
@@ -468,6 +478,21 @@ def _pl_rig_worker(env, sync: PolicySync, latest: LatestWeights | None,
             def before_start():
                 words, meta = sync.request(SYNC_TIMEOUT_S, ep_i)
                 info.update(meta, synced=words is not None)
+                # SAC exploration in the PL: on for training episodes, off for
+                # evals (and whenever the learner did not answer in time).
+                explore = bool(words is not None and meta.get("pl_explore"))
+                has_sac = env.client.weights.has_sac_head
+                if explore and not has_sac:
+                    if not warned["no_sac"]:
+                        print("  [warn] bitstream has no SAC head: PL episodes run "
+                              "deterministically (use --pl-explore param)")
+                        warned["no_sac"] = True
+                    explore = False
+                if explore:
+                    env.client.set_noise_seed(meta["noise_seed"])
+                if has_sac:
+                    env.client.set_explore(explore)
+                info["explored"] = explore
                 if words is None:
                     print("  [warn] learner did not provide weights in time; "
                           "reusing the previous ones")
@@ -558,9 +583,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="[cpu] control-loop overrun above this for 3 consecutive "
                         "ticks raises TimingViolation and disengages motor")
     # --- pl inference (deployment bitstream) ---
+    p.add_argument("--pl-explore", choices=("sac", "param", "none"), default=None,
+                   help="[pl] exploration on training episodes: sac = the PL samples "
+                        "tanh(mu + std*eps) (default; needs the SAC-head bitstream), "
+                        "param = noise on the uploaded weights (--param-noise), "
+                        "none = deterministic. Default: param if --param-noise > 0, else sac.")
     p.add_argument("--param-noise", type=float, default=0.0,
                    help="[pl] std of Gaussian noise on the uploaded weights "
-                        "(one draw per episode; exploration for the deterministic PL policy)")
+                        "(one draw per episode; with --pl-explore param)")
     p.add_argument("--bitstream", default=None,
                    help="[pl] deployment .xsa/.bit (default: FpgaDeployClient's)")
     p.add_argument("--no-download", action="store_true",
@@ -632,7 +662,8 @@ def main(argv: list[str] | None = None) -> int:
                         "async_<inference>_<source run>_<timestamp>.")
     p.add_argument("--device", default="cpu",
                    help="torch device. CPU is fine for this small policy")
-    p.add_argument("--seed", type=int, default=0, help="seed for the parameter noise")
+    p.add_argument("--seed", type=int, default=0,
+                   help="seed for the PL exploration noise (per episode) / parameter noise")
     # Reward weights are read from config.json so the rig optimises the same
     # objective as the sim run. These flags only exist to override on purpose.
     p.add_argument("--reward-stillness-bonus-weight", type=float, default=None,
@@ -662,9 +693,18 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     use_pl = args.inference == "pl"
     weight_sync = args.weight_sync
-    if not use_pl and args.param_noise > 0:
-        print("ERROR: --param-noise is for --inference pl; cpu explores with "
-              "stochastic actions", file=sys.stderr)
+    if not use_pl and (args.param_noise > 0 or args.pl_explore is not None):
+        print("ERROR: --param-noise / --pl-explore are for --inference pl; cpu "
+              "explores with stochastic actions", file=sys.stderr)
+        return 2
+    if args.pl_explore is None:
+        args.pl_explore = "param" if args.param_noise > 0 else "sac"
+    if args.pl_explore != "param" and args.param_noise > 0:
+        print(f"ERROR: --param-noise needs --pl-explore param (got {args.pl_explore})",
+              file=sys.stderr)
+        return 2
+    if args.pl_explore == "param" and args.param_noise <= 0:
+        print("ERROR: --pl-explore param needs --param-noise > 0", file=sys.stderr)
         return 2
     if use_pl and (args.deterministic or args.dt_jitter_frac != 0.05):
         print("note: --deterministic / --dt-jitter-frac only apply to --inference cpu")
@@ -775,6 +815,7 @@ def main(argv: list[str] | None = None) -> int:
                    "weight_sync": weight_sync,
                    "pl_upload_interval_s": args.pl_upload_interval_s if use_pl else None,
                    "rest_check_s": args.rest_check_s,
+                   "pl_explore": args.pl_explore if use_pl else None,
                    "param_noise": args.param_noise if use_pl else None,
                    "deterministic": bool(args.deterministic) if not use_pl else True,
                    "dt_jitter_frac": args.dt_jitter_frac if not use_pl else None,
@@ -1127,7 +1168,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nStarting fine-tune ({args.inference} inference): {args.episodes} episodes × "
           f"{args.episode_length_s} s @ {control_freq:g} Hz, "
           f"K={args.gradient_steps}, lr={args.learning_rate}, sync={weight_sync}"
-          + (f", param noise {args.param_noise:g}" if use_pl else ""))
+          + ((f", PL exploration {args.pl_explore}"
+              + (f" (param noise {args.param_noise:g})" if args.pl_explore == "param" else ""))
+             if use_pl else ""))
     print(f"Real transitions so far: {real_buf.size()}, "
           f"learning_starts={args.learning_starts}")
     if args.eval_every > 0:
@@ -1152,6 +1195,10 @@ def main(argv: list[str] | None = None) -> int:
                 if use_pl:
                     payload, noise = export_words(ep_next, is_eval)
                     meta["param_noise"] = noise
+                    meta["pl_explore"] = args.pl_explore == "sac" and not is_eval
+                    # non-zero 32-bit LFSR seed, reproducible per (seed, episode)
+                    meta["noise_seed"] = int(np.random.default_rng([args.seed, ep_next, 1])
+                                             .integers(1, 2**32))
                     if latest is not None:
                         meta["version"] = latest.put(ep_next, payload, n_grad_total)
                     last_export_t = time.monotonic()

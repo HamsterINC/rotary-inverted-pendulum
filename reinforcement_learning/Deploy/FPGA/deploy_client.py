@@ -63,12 +63,16 @@ REG_DEPLOY_STATUS = 0x1_0010     # bit0 engaged, bit1 SW1 armed, bit2 policy act
 REG_LOG_COUNT     = 0x1_0014     # records written since power-up
 REG_LOG_INFO      = 0x1_0018     # [15:0] depth, [31:16] words per record
 REG_PS_ACCEL      = 0x1_001C     # [15:0] action Q.9 while the policy is off; write = strobe
+REG_SAC_SEED      = 0x1_0030     # SAC noise LFSR seed (non-zero write reseeds)
+REG_SAC_DIAG0     = 0x1_0034     # [15:0] mean, [31:16] log_std (Q.9)
+REG_SAC_DIAG1     = 0x1_0038     # [15:0] eps (Q3.12), [31:16] u (Q.9)
 LOG_BASE          = 0x1_8000
 
 CTRL_ENGAGE     = 0x1
 CTRL_PS_CONTROL = 0x2
 CTRL_TARE       = 0x4
 CTRL_POLICY     = 0x8
+CTRL_EXPLORE    = 0x10           # SAC head: sample actions (0: deterministic tanh(mean))
 
 # Fixed-point formats of the deployment pipeline (top_pipeline parameters)
 OBS_FRAC_BITS    = 9             # FRAC_POS = FRAC_VEL = FRAC_W = 9 (sin/cos too)
@@ -116,13 +120,15 @@ class StepRecord:
     obs     : the 6 network inputs, float, order = HW_INPUT_ORDER =
               [motor_pos, sin, cos, motor_vel, pen_vel, prev_act]
               (same order as pendulum_env with obs_norm="raw", history 1)
-    action  : network output clipped to [-1, 1] (what the PL commanded,
-              unless `brake` is set: then the rail brake overrode it)
+    action  : the action the PL commanded, in [-1, 1] (unless `brake` is set:
+              then the rail brake overrode it). SAC-head bitstream: tanh(mean +
+              std*eps) when `explored`, else tanh(mean). Legacy bitstream:
+              network output clipped to [-1, 1].
     """
     index: int                   # global log index (LOG_COUNT - 1 when newest)
     obs: np.ndarray
     obs_raw: np.ndarray          # int16 codes
-    action_raw: int              # int16 network output (Q.9)
+    action_raw: int              # int16 action code (Q.9)
     action: float
     brake: bool
     weight_bank: int
@@ -131,6 +137,7 @@ class StepRecord:
     episode_step: int            # 0, 1, 2 ... within one engage
     motor_counts: int            # motor encoder counts since the last tare
     episode: int                 # PL engage counter
+    explored: bool = False       # SAC head sampled this action (DEPLOY_CTRL explore bit)
 
     @classmethod
     def from_words(cls, index: int, w: np.ndarray) -> "StepRecord":
@@ -152,7 +159,16 @@ class StepRecord:
             episode_step=int(w[5]),
             motor_counts=_to_int32(int(w[6])),
             episode=int(w[7]),
+            explored=bool(flags & 8),
         )
+
+
+class SacSample(NamedTuple):
+    """Last SAC-head sample (SAC_DIAG registers), updated with every log record."""
+    mean: float                  # network output 0
+    log_std: float               # network output 1 (before the [-5, 2] clamp)
+    eps: float                   # N(0,1) draw actually used (0 when not exploring)
+    u: float                     # mean + std * eps, before tanh
 
 
 class LogOverrun(RuntimeError):
@@ -199,6 +215,7 @@ class FpgaDeployClient:
 
         self._lock = threading.RLock()
         self._ctrl = 0
+        self._explore = False            # kept across engage / policy changes
         # Take control with the motor off; from here on SW1 is only the arm switch.
         self._write_ctrl(CTRL_PS_CONTROL)
 
@@ -222,6 +239,8 @@ class FpgaDeployClient:
 
     def _write_ctrl(self, c: int) -> None:
         self._ctrl = c & (CTRL_ENGAGE | CTRL_PS_CONTROL | CTRL_POLICY)
+        if self._explore:
+            self._ctrl |= CTRL_EXPLORE
         self.mmio.write(REG_DEPLOY_CTRL, self._ctrl)
 
     def _write_accel_q(self, q: int) -> None:
@@ -297,6 +316,39 @@ class FpgaDeployClient:
             self.mmio.write(REG_DEPLOY_CTRL, self._ctrl | CTRL_TARE)
             time.sleep(TARE_SETTLE_S)
         return True
+
+    # ------------------------------------------------------------------
+    # SAC exploration (bitstreams with the SAC head, weights.has_sac_head)
+    # ------------------------------------------------------------------
+
+    def set_explore(self, on: bool) -> None:
+        """on: the PL samples action = tanh(mean + std*eps) (training episodes);
+        off: deterministic tanh(mean) (evaluation). Takes effect at the next
+        policy step and stays set across engage / start_policy / disengage."""
+        if on and not self.weights.has_sac_head:
+            raise RuntimeError("bitstream has no SAC head (ID 0x57E1_0004): cannot explore")
+        with self._lock:
+            self._explore = bool(on)
+            self._write_ctrl(self._ctrl)
+
+    def set_noise_seed(self, seed: int) -> None:
+        """Reseed the PL noise generator (e.g. per episode, for reproducible
+        exploration). seed must be non-zero (32 bit)."""
+        seed = int(seed) & 0xFFFFFFFF
+        if seed == 0:
+            raise ValueError("seed must be non-zero")
+        self.mmio.write(REG_SAC_SEED, seed)
+
+    def sac_sample(self) -> SacSample:
+        """Last SAC-head sample. The two registers update together with
+        LOG_COUNT, so read them right after a new record (no tearing in
+        practice at the policy rate)."""
+        d0 = self.mmio.read(REG_SAC_DIAG0)
+        d1 = self.mmio.read(REG_SAC_DIAG1)
+        return SacSample(mean=q16_to_float(_to_int16(d0), ACTION_FRAC_BITS),
+                         log_std=q16_to_float(_to_int16(d0 >> 16), ACTION_FRAC_BITS),
+                         eps=_to_int16(d1) / 4096.0,
+                         u=q16_to_float(_to_int16(d1 >> 16), ACTION_FRAC_BITS))
 
     def is_engaged(self) -> bool:
         return bool(self.mmio.read(REG_DEPLOY_STATUS) & 1)

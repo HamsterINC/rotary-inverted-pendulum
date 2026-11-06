@@ -243,6 +243,12 @@ class AsyncControlLoop:
             self.last_error = e
             raise
 
+        # Sample-synced pacing (FPGA_env with sample_sync=True): wait for PL
+        # samples instead of the perf_counter deadline below.
+        sample_sync = bool(getattr(env, "sample_sync", False))
+        if hasattr(env, "prepare_control_thread"):
+            env.prepare_control_thread()   # optional core pinning / SCHED_FIFO
+
         next_tick = time.perf_counter()
         last_tick = next_tick
         stats = TickStats()
@@ -278,24 +284,37 @@ class AsyncControlLoop:
                 #    Optional dt_jitter applies ±frac to this tick's
                 #    interval, replicating the legacy variable-rate
                 #    regularization that produced the calm attractor.
+                #
+                #    With sample_sync the wait is on the PL's 2 ms sample
+                #    clock instead (same sleep-then-spin idea, see
+                #    env.wait_next_tick); dt_jitter is then rounded to whole
+                #    samples.
+                jitter = 0.0
                 if self._dt_jitter_frac > 0.0:
                     jitter = self._jitter_rng.uniform(
                         -self._dt_jitter_frac, self._dt_jitter_frac
                     )
-                    next_tick += self._dt * (1.0 + jitter)
+                if sample_sync:
+                    try:
+                        overrun = env.wait_next_tick(1.0 + jitter)
+                    except (OSError, KeyboardInterrupt):
+                        terminated = True
+                        break
+                    slept = True
+                    now = time.perf_counter()
                 else:
-                    next_tick += self._dt
-                sleep_for = next_tick - time.perf_counter()
-                slept = sleep_for > 0
-                if slept:
-                    if sleep_for > 0.001:
-                        time.sleep(sleep_for - 0.001)
-                    while time.perf_counter() < next_tick:
-                        pass
+                    next_tick += self._dt * (1.0 + jitter)
+                    sleep_for = next_tick - time.perf_counter()
+                    slept = sleep_for > 0
+                    if slept:
+                        if sleep_for > 0.001:
+                            time.sleep(sleep_for - 0.001)
+                        while time.perf_counter() < next_tick:
+                            pass
+                    now = time.perf_counter()
+                    overrun = now - next_tick
 
                 # 3. Measure tick health (for telemetry + violation check)
-                now = time.perf_counter()
-                overrun = now - next_tick
                 tick_dt_ms = (now - last_tick) * 1000.0
                 last_tick = now
                 stats.n_ticks += 1

@@ -36,6 +36,17 @@ Termination/Truncation:
       enforces this in hardware, so the policy should never command
       past it; the check here is the policy's "feedback" if it does).
 
+Loop timing (sample_sync=True, default):
+    - The loop is paced on the PL's 500 Hz sample clock instead of
+      time.sleep: after an action it waits (sleep, then spin on time_us) for
+      the sample `round(dt / 2 ms)` samples after the one the last obs used,
+      then reads that sample. Every obs is therefore a freshly published
+      sample and the period follows the PL clock. dt is rounded to a whole
+      number of 2 ms samples (warned at construction if that changes it).
+    - realtime=True pins the control thread to `rt_cpu` and asks for
+      SCHED_FIFO `rt_priority` (needs root) — see enter_realtime().
+    - The client logs per-action period / delay in `client.timing_log`.
+
 Safety:
     - `_on_signal` / `disengage_safely` disengage the motor; the
       orchestrator (`finetune_async.main()`) owns signal wiring.
@@ -55,7 +66,14 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from Deploy.FPGA.FPGA_lowlevel_client import FpgaLowLevelClient
+import threading
+
+from Deploy.FPGA.FPGA_lowlevel_client import (
+    SAMPLE_PERIOD_US,
+    FpgaLowLevelClient,
+    enter_realtime,
+    us_diff,
+)
 from Training.reward import RewardWeights, compute_reward
 from Simulation.pendulum_env import (
     CONTROL_FREQ_HZ,
@@ -159,6 +177,11 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         reward_alive_offset: float | None = None,
         reward_upright_alive_weight: float | None = None,
         params_path: str | Path | None = None,  # accepted for CLI parity; unused
+        # --- loop timing (see module docstring) ---
+        sample_sync: bool = True,     # pace on PL samples instead of time.sleep
+        realtime: bool = False,       # pin + SCHED_FIFO the control thread
+        rt_cpu: int | None = 3,
+        rt_priority: int = 50,
     ):
         super().__init__()
         if obs_norm not in OBS_NORM_PRESETS:
@@ -214,6 +237,19 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
 
         self._dt = 1.0 / control_freq_hz
         self._max_steps = int(episode_length_s * control_freq_hz)
+
+        self.sample_sync = bool(sample_sync)
+        self.realtime = bool(realtime)
+        self.rt_cpu = rt_cpu
+        self.rt_priority = int(rt_priority)
+        self._rt_threads: set[int] = set()
+        self._samples_per_tick = max(1, round(self._dt * 1e6 / SAMPLE_PERIOD_US))
+        if self.sample_sync:
+            eff_dt = self._samples_per_tick * SAMPLE_PERIOD_US * 1e-6
+            if abs(eff_dt - self._dt) > 0.005 * self._dt:
+                print(f"[real_env] note: sample-synced loop runs every "
+                      f"{self._samples_per_tick} PL samples = {1.0 / eff_dt:.3f} Hz "
+                      f"(requested {control_freq_hz:g} Hz)")
 
         # Lazy-init the serial connection on the first reset() so that
         # SB3's vectorised env wrappers don't open the port at construction
@@ -353,6 +389,36 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         # Un-flip server's sign convention to put us in sim frame.
         return (s.time_us, -s.motor_pos_rad, -s.pendulum_pos_rad,
                 -s.motor_vel_rad_s, -s.pendulum_vel_rad_s)
+
+    def prepare_control_thread(self) -> None:
+        """Apply the realtime settings to the calling thread (once per thread)."""
+        if not self.realtime:
+            return
+        tid = threading.get_ident()
+        if tid in self._rt_threads:
+            return
+        self._rt_threads.add(tid)
+        done = enter_realtime(cpu=self.rt_cpu, priority=self.rt_priority)
+        print(f"[real_env] control thread realtime: {done}")
+
+    def wait_next_tick(self, dt_scale: float = 1.0) -> float:
+        """Sample-synced pacing: wait for the PL sample one control period
+        (scaled by dt_scale, rounded to whole samples) after the sample the
+        last observation used. Returns how late that sample was already
+        published when we got there, in seconds (0.0 when on time).
+
+        If we are late, the next observe_and_step() simply reads the newest
+        sample and the following tick is timed from that one, so a slow
+        tick never causes a burst of catch-up ticks. The first tick after
+        reset() reports 0 lateness (reset's own duration is not loop time).
+        Raises TimeoutError (an OSError) if the PL stops producing samples.
+        """
+        n = max(1, round(self._dt * dt_scale * 1e6 / SAMPLE_PERIOD_US))
+        target = self._last_time_us + n * SAMPLE_PERIOD_US
+        seen = self._client.wait_for_sample(target)   # type: ignore[union-attr]
+        if self._step_count == 0:
+            return 0.0
+        return max(0.0, us_diff(seen, target) * 1e-6)
 
     def _wait_for_pendulum_rest(self, client: FpgaLowLevelClient) -> bool:
         """Block until the pendulum is still (|pen_vel| below threshold AND the
@@ -608,6 +674,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         composes `apply_action` + externally-paced sleep + `observe_and_step`
         directly so the control rate is held even when the learner is busy.
         """
+        self.prepare_control_thread()
         try:
             a = self.apply_action(action)
         except OSError:
@@ -617,12 +684,18 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         # Pace to the requested control rate. If gradient updates between
         # step() calls exceed `_dt`, the rate silently drops — the async
         # architecture in `async_control.py` paces externally instead.
-        self._next_tick += self._dt
-        sleep_for = self._next_tick - time.monotonic()
-        if sleep_for > 0:
-            time.sleep(sleep_for)
+        if self.sample_sync:
+            try:
+                self.wait_next_tick()
+            except OSError:
+                return self._build_obs(self._motor_pos_prev, self._phi_prev), 0.0, True, False, {}
         else:
-            self._next_tick = time.monotonic()
+            self._next_tick += self._dt
+            sleep_for = self._next_tick - time.monotonic()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            else:
+                self._next_tick = time.monotonic()
 
         return self.observe_and_step(a)
 
