@@ -130,11 +130,12 @@ def _run_one(task) -> list[dict]:
         return rows
 
 
-def _worker_main(task, result_path: str) -> None:
+def _worker_main(task, result_path: str, parent_pid: int) -> None:
     """Entry point of one parallel run (its own process). Rows go to result_path as
-    JSON; a Python error is appended to the run's log and exits with code 1."""
-    _init_worker()
+    JSON; any Python error (startup included) is appended to the run's log and the
+    process exits with code 1."""
     try:
+        _init_worker(parent_pid)
         rows = _run_one(task)
     except BaseException:
         with open(task[3], "a") as f:
@@ -176,7 +177,8 @@ def _run_parallel(tasks, jobs: int, on_rows, on_fail) -> None:
                 name = t[0]["run"]
                 res = LOG_DIR / f"{name}.result.json"
                 res.unlink(missing_ok=True)
-                proc = ctx.Process(target=_worker_main, args=(t, str(res)), name=name)
+                proc = ctx.Process(target=_worker_main, args=(t, str(res), os.getpid()),
+                                   name=name)
                 proc.start()
                 running[proc.sentinel] = (name, proc, res)
                 print(f"started: {name} (log: {t[3]})", flush=True)
