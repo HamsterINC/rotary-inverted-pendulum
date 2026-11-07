@@ -45,10 +45,11 @@ import itertools
 import json
 import multiprocessing as mp
 import os
+import signal
 import sys
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing.connection import wait as mp_wait
 from pathlib import Path
 
 # Imports are relative to reinforcement_learning/ (same as train_sac.py). sys.path is
@@ -97,8 +98,8 @@ def _run_one(task) -> list[dict]:
         args, qargs = T.parse_all(argv_run)
         run_dir = T.train_qat(args, qargs)
         try:
-            with open(run_dir / "quant_config.json") as fh:
-                fmts = json.load(fh).get("obs_formats")
+            with open(run_dir / "config.json") as fh:
+                fmts = json.load(fh)["quant"].get("obs_formats")
             meta = dict(meta, obs_formats=" ".join(fmts) if fmts else FP)
         except Exception:
             meta = dict(meta, obs_formats="?")
@@ -110,6 +111,72 @@ def _run_one(task) -> list[dict]:
             m = T.evaluate_headless(path, args, qargs, n_eval)
             rows.append(dict(meta, which=which, **m))
         return rows
+
+
+def _worker_main(task, result_path: str) -> None:
+    """Entry point of one parallel run (its own process). Rows go to result_path as
+    JSON; a Python error is appended to the run's log and exits with code 1."""
+    _init_worker()
+    try:
+        rows = _run_one(task)
+    except BaseException:
+        with open(task[3], "a") as f:
+            f.write("\n" + traceback.format_exc())
+        sys.exit(1)
+    Path(result_path).write_text(json.dumps(rows))
+
+
+def _describe_exit(code) -> str:
+    """Why a worker process ended without a result."""
+    if code is None or code >= 0:
+        return f"exit code {code} (Python error, see the end of the log)"
+    try:
+        name = signal.Signals(-code).name
+    except ValueError:
+        name = {1: "SIGHUP", 9: "SIGKILL", 15: "SIGTERM"}.get(-code, f"signal {-code}")
+    hint = {
+        "SIGKILL": "usually the out-of-memory killer or a job-scheduler limit "
+                   "(check `dmesg | grep -i -E 'oom|killed'`); try fewer --jobs",
+        "SIGSEGV": "native crash (MuJoCo / torch); the log shows how far it got",
+        "SIGTERM": "terminated from outside (scheduler, kill, shutdown)",
+        "SIGHUP": "terminal closed; run the sweep under nohup / tmux / screen",
+    }.get(name, "")
+    return f"killed by {name}" + (f": {hint}" if hint else "")
+
+
+def _run_parallel(tasks, jobs: int, on_rows, on_fail) -> None:
+    """One fresh process per run, at most `jobs` at a time. A run that dies (OOM
+    kill, segfault) only fails itself; the rest of the sweep keeps going."""
+    os.environ.setdefault("OMP_NUM_THREADS", "1")   # inherited by spawned workers
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    ctx = mp.get_context("spawn")                    # safe with CUDA and MuJoCo
+    pending = list(tasks)
+    running = {}                                     # sentinel -> (name, process, result path)
+    try:
+        while pending or running:
+            while pending and len(running) < jobs:
+                t = pending.pop(0)
+                name = t[0]["run"]
+                res = LOG_DIR / f"{name}.result.json"
+                res.unlink(missing_ok=True)
+                proc = ctx.Process(target=_worker_main, args=(t, str(res)), name=name)
+                proc.start()
+                running[proc.sentinel] = (name, proc, res)
+                print(f"started: {name} (log: {t[3]})", flush=True)
+            for sentinel in mp_wait(list(running)):
+                name, proc, res = running.pop(sentinel)
+                proc.join()
+                if proc.exitcode == 0 and res.exists():
+                    on_rows(name, json.loads(res.read_text()))
+                    res.unlink()
+                    print(f"done: {name}", flush=True)
+                else:
+                    on_fail(name, f"{_describe_exit(proc.exitcode)}; log: {LOG_DIR / name}.log")
+    finally:
+        for _, proc, _ in running.values():          # Ctrl-C / parent error: stop the rest
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
 
 
 def _parse_abs_max(items) -> dict:
@@ -209,43 +276,35 @@ def main(argv=None) -> int:
           f"= {len(tasks)} runs, obs bits mode: {obs_mode}, jobs={sw.jobs}")
 
     failures = []
+    fh, writer = _open_results(Path(sw.out))
 
-    def record(writer, fh, name, rows):
+    def record(name, rows):
         for r in rows:
             writer.writerow({k: r.get(k, "") for k in FIELDS})
             print(f"  {name} {r['which']}: return {r['mean_return']:.1f} "
                   f"upright {r['upright_frac']:.2f}  obs {r['obs_formats']}")
         fh.flush()
 
-    fh, writer = _open_results(Path(sw.out))
+    def fail(name, why):
+        print(f"FAILED: {name}: {why}", flush=True)
+        failures.append((name, why))
+
     with fh:
         if sw.jobs <= 1:
             for t in tasks:
                 print(f"\n===== {t[0]['run']} =====")
                 try:
-                    record(writer, fh, t[0]["run"], _run_one(t))
-                except Exception:
+                    record(t[0]["run"], _run_one(t))
+                except Exception as e:
                     traceback.print_exc()
-                    failures.append(t[0]["run"])
+                    fail(t[0]["run"], repr(e))
         else:
-            os.environ.setdefault("OMP_NUM_THREADS", "1")   # inherited by spawned workers
-            os.environ.setdefault("MKL_NUM_THREADS", "1")
-            ctx = mp.get_context("spawn")                    # safe with CUDA and MuJoCo
-            with ProcessPoolExecutor(max_workers=sw.jobs, mp_context=ctx,
-                                     initializer=_init_worker) as ex:
-                futs = {ex.submit(_run_one, t): t[0]["run"] for t in tasks}
-                for fut in as_completed(futs):
-                    name = futs[fut]
-                    try:
-                        record(writer, fh, name, fut.result())
-                        print(f"done: {name}")
-                    except Exception:
-                        traceback.print_exc()
-                        print(f"FAILED: {name} (see {LOG_DIR / name}.log)")
-                        failures.append(name)
+            _run_parallel(tasks, sw.jobs, record, fail)
     print(f"\nResults in {sw.out}")
     if failures:
-        print(f"{len(failures)} failed: {failures}")
+        print(f"{len(failures)} failed:")
+        for name, why in failures:
+            print(f"  {name}: {why}")
     return 1 if failures else 0
 
 
