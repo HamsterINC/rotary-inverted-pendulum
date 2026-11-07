@@ -89,7 +89,7 @@ def default_obs_abs_max(env: gym.Env) -> np.ndarray:
     """Per-dimension |max| for the FULL observation vector (all stacked
     frames, oldest -> newest), derived from the env's obs_norm preset,
     obs_include_velocities and obs_history_len."""
-    from reinforcement_learning.Simulation.pendulum_env import OBS_NORM_PRESETS
+    from Simulation.pendulum_env import OBS_NORM_PRESETS
     u = env.unwrapped
     preset = OBS_NORM_PRESETS[u.obs_norm_name]
     feats, gain = preset.get("feats", {}), preset.get("gain", 1.0)

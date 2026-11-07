@@ -42,6 +42,11 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+# Imports below are relative to reinforcement_learning/ (same as train_sac.py).
+_RL_ROOT = Path(__file__).resolve().parents[1]
+if str(_RL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_RL_ROOT))
+
 import numpy as np
 import torch as th
 from stable_baselines3 import SAC
@@ -49,9 +54,9 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-import reinforcement_learning.Training.symmetry as symmetry
-import reinforcement_learning.Training.train_sac as train_sac
-from reinforcement_learning.Training.qat import (
+import Training.symmetry as symmetry
+import Training.train_sac as train_sac
+from Training.qat import (
     FixedPointQuantizer,
     QATConfig,
     QATSACPolicy,
@@ -104,6 +109,9 @@ def parse_qat_args(argv: list[str]):
 def parse_all(argv: list[str]):
     qargs, rest = parse_qat_args(argv)
     args = train_sac.parse_args(rest)
+    if (args.dr_transport_delay_max is not None
+            and args.dr_transport_delay_min > args.dr_transport_delay_max):
+        raise SystemExit("--dr-transport-delay-min must be <= --dr-transport-delay-max")
     return args, qargs
 
 
@@ -221,8 +229,8 @@ def _dr_ranges(args) -> dict:
     return dict(
         accel=((args.dr_accel_min, args.dr_accel_max)
                if args.dr_accel_max is not None else None),
-        lag=((args.dr_action_lag_tau_min, args.dr_action_lag_tau_max)
-             if args.dr_action_lag_tau_max is not None else None),
+        delay=((args.dr_transport_delay_min, args.dr_transport_delay_max)
+               if args.dr_transport_delay_max is not None else None),
         stale=((args.dr_obs_staleness_min, args.dr_obs_staleness_max)
                if args.dr_obs_staleness_max is not None else None),
     )
@@ -234,7 +242,6 @@ def _shared_env_kwargs(args) -> dict:
         params_path=args.params_path,
         control_freq_hz=args.control_freq,
         max_accel_rad_s2=args.max_accel_rad_s2,
-        max_action_delta_rad=args.max_action_delta_rad,
         reward_motor_vel_weight=args.reward_motor_vel_weight,
         reward_motor_pos_weight=args.reward_motor_pos_weight,
         reward_stillness_bonus_weight=args.reward_stillness_bonus_weight,
@@ -255,8 +262,9 @@ def _train_env_kwargs(args) -> dict:
         **_shared_env_kwargs(args),
         domain_randomization=args.domain_randomization,
         dr_motor_accel_range_rad_s2=dr["accel"],
-        dr_action_lag_tau_range_s=dr["lag"],
+        dr_transport_delay_range_s=dr["delay"],
         dr_obs_staleness_range_s=dr["stale"],
+        transport_delay_s=args.transport_delay_s,  # used when DR is off
         dr_control_dt_jitter_frac=args.dr_dt_jitter_frac,
         dr_theta_bias_max_rad=args.dr_theta_bias_max_rad,
         upright_reset_frac=args.upright_reset_frac,
@@ -265,21 +273,14 @@ def _train_env_kwargs(args) -> dict:
 
 def _eval_env_kwargs(args) -> dict:
     """Deterministic reference scenario: no DR, no theta-bias, hanging-only resets.
-    Transport lag / staleness are pinned to the midpoint of the training DR ranges
-    (same rule as train_sac.train()), so best_model is not selected by a test the
-    training episodes never saw."""
-    dr = _dr_ranges(args)
-    eval_lag_tau_s = (
-        (args.dr_action_lag_tau_min + args.dr_action_lag_tau_max) / 2.0
-        if args.dr_action_lag_tau_max is not None else 0.0
-    )
-    eval_stale_s = (sum(dr["stale"]) / 2.0) if dr["stale"] else None
+    Transport delay / staleness are pinned to the nominal rig by
+    train_sac._nominal_rig_kwargs (same rule as train_sac.train()), so best_model
+    is not selected by a test the training episodes never saw."""
     return dict(
         **_shared_env_kwargs(args),
         domain_randomization=False,
-        action_lag_tau_s=eval_lag_tau_s,
-        obs_staleness_s=eval_stale_s,
         dr_theta_bias_max_rad=0.0,
+        **train_sac._nominal_rig_kwargs(args),
     )
 
 

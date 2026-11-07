@@ -12,11 +12,10 @@ Axes
                     in each dimension's own units; raw words end up wider.
   --weight-bits / --act-bits   actor weight / activation bits
 
-The quantizer range (abs_max) is set PER NORMALIZATION VARIANT by this script, so raw
-observations are never squeezed into Q0.X:
-  orig: 1,1,1,1,1,1                          (everything normalized to +-1)
-  raw : 2.531,1,1,6,32,1                     [motor_pos, cos, sin, motor_vel, pen_vel, prev_act]
-Override with --abs-max NAME=a,b,c,d,e,f (see obs_stats.py for data-driven values).
+The quantizer range (abs_max) per dim is derived by qat.default_obs_abs_max from the
+env's obs_norm preset (OBS_NORM_PRESETS in pendulum_env.py), so raw observations are
+never squeezed into Q0.X. Frame layout: [motor_pos, sin, cos, motor_vel, pen_vel, prev_act].
+Override a variant with --abs-max NAME=a,b,c,d,e,f.
 The format actually used is stored in the CSV (obs_formats), e.g. raw pen_vel shows up as Q5.x.
 
 Examples
@@ -31,7 +30,8 @@ Examples
                         -- --total-steps 180000 --device cpu
 
 Everything after `--` is forwarded to train_sac_qat.py / train_sac.py (do not pass
---obs-norm there; --norm-variants controls it). Results are appended to
+--obs-norm there; --norm-variants controls it). Delay flags are train_sac's:
+--transport-delay-s, --dr-transport-delay-min/max (residual delay after the boxcar). Results are appended to
 sweep_results.csv (headless eval of last.zip and best_model.zip, quantized env + policy).
 """
 
@@ -50,14 +50,15 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+# Imports are relative to reinforcement_learning/ (same as train_sac.py). sys.path is
+# inherited by the spawned workers, so this also covers --jobs > 1.
+_RL_ROOT = Path(__file__).resolve().parents[1]
+if str(_RL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_RL_ROOT))
+LOG_DIR = Path(__file__).resolve().parent / "runs"
+
 FP = "fp"
 NORM_FLAG = "--obs-norm"
-# Must match qat.RAW_OBS_ABS_MAX / NORMALIZED_OBS_ABS_MAX (duplicated so the parent
-# process does not need to import torch).
-DEFAULT_ABS_MAX = {
-    "orig": "1,1,1,1,1,1",
-    "raw": "2.531,1,1,6,32,1",
-}
 FIELDS = ["run", "obs_norm", "obs_mode", "obs_bits", "obs_formats", "weight_bits", "act_bits",
           "seed", "which", "mean_return", "std_return", "upright_frac"]
 
@@ -129,7 +130,8 @@ def _run_one(task) -> list[dict]:
 
 
 def _parse_abs_max(items) -> dict:
-    table = dict(DEFAULT_ABS_MAX)
+    """Explicit per-variant overrides only; other variants use the env-derived range."""
+    table = {}
     for it in items or []:
         name, _, vals = it.partition("=")
         if len(vals.split(",")) != 6:
@@ -161,9 +163,6 @@ def build_tasks(sw, base):
     wb = [_tok(v) for v in sw.weight_bits]
     ab = [_tok(v) for v in sw.act_bits]
     abs_max = _parse_abs_max(sw.abs_max)
-    for v in sw.norm_variants:
-        if v not in abs_max:
-            raise SystemExit(f"variant {v!r} needs --abs-max {v}=a,b,c,d,e,f")
     configs = build_configs(ob, wb, ab, sw.mode)
     tasks = []
     for norm, (o, w, a), seed in itertools.product(sw.norm_variants, configs, sw.seeds):
@@ -173,16 +172,17 @@ def build_tasks(sw, base):
         if norm != "raw":
             argv_run += [NORM_FLAG, norm]
         if o is not None:
-            argv_run += ["--obs-frac-bits" if obs_mode == "frac" else "--obs-word-bits", str(o),
-                         "--obs-abs-max", abs_max[norm]]
+            argv_run += ["--obs-frac-bits" if obs_mode == "frac" else "--obs-word-bits", str(o)]
+            if norm in abs_max:
+                argv_run += ["--obs-abs-max", abs_max[norm]]
         if w is not None:
             argv_run += ["--weight-bits", str(w)]
         if a is not None:
             argv_run += ["--act-bits", str(a)]
         log = None
         if sw.jobs > 1:
-            Path("runs").mkdir(exist_ok=True)
-            log = str(Path("runs") / f"{name}.log")
+            LOG_DIR.mkdir(exist_ok=True)
+            log = str(LOG_DIR / f"{name}.log")
         meta = dict(run=name, obs_norm=norm, obs_mode=obs_mode,
                     obs_bits=o if o is not None else FP,
                     weight_bits=w or FP, act_bits=a or FP, seed=seed)
@@ -197,10 +197,10 @@ def parse(argv):
     p.add_argument("--weight-bits", nargs="+", default=[FP])
     p.add_argument("--act-bits", nargs="+", default=[FP])
     p.add_argument("--norm-variants", nargs="+", default=["orig", "raw"],
-                   help='"orig" = pass --obs-norm orig; "raw" = omit the flag. Any other '
-                        "name is passed as --obs-norm NAME and needs an --abs-max entry.")
+                   help='"raw" = omit the flag; any other name (an OBS_NORM_PRESETS key, '
+                        'e.g. "orig") is passed as --obs-norm NAME.')
     p.add_argument("--abs-max", nargs="*", default=None, metavar="NAME=a,b,c,d,e,f",
-                   help="per-variant quantizer ranges (overrides the defaults above)")
+                   help="per-variant quantizer ranges (default: derived from the preset)")
     p.add_argument("--mode", choices=["one-at-a-time", "grid"], default="one-at-a-time")
     p.add_argument("--seeds", type=int, nargs="+", default=[0])
     p.add_argument("--eval-episodes", type=int, default=10)
@@ -258,7 +258,7 @@ def main(argv=None) -> int:
                         print(f"done: {name}")
                     except Exception:
                         traceback.print_exc()
-                        print(f"FAILED: {name} (see runs/{name}.log)")
+                        print(f"FAILED: {name} (see {LOG_DIR / name}.log)")
                         failures.append(name)
     print(f"\nResults in {sw.out}")
     if failures:
