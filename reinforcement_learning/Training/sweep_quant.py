@@ -21,8 +21,7 @@ The format actually used is stored in the CSV (obs_formats), e.g. raw pen_vel sh
 
 Examples
   # one axis at a time, others float, both normalizations (cheapest way to find each knee)
-  python sweep_quant.py --obs-word-bits fp 16 12 10 8 --weight-bits fp 8 6 4 \
-                        --act-bits fp 8 6 --seeds 0 1 -- --total-steps 180000 --domain-randomization
+  python -m Training.sweep_quant --mode grid --jobs 48 --obs-word-bits 16 12 8 4 --weight-bits 16 12 8 4 --act-bits 16 12 8 4 --seeds 0 1 2 3 4 -- --total-steps 180000 --domain-randomization
 
   # same fractional bits for both normalizations: Q0.X vs QY.X
   python sweep_quant.py --obs-frac-bits fp 11 9 7 --norm-variants orig raw -- --total-steps 180000
@@ -77,16 +76,34 @@ def build_configs(ob, wb, ab, mode):
     return list(dict.fromkeys(cfgs))  # de-dup, keep order
 
 
-def _init_worker():
-    # One torch thread per process: parallelism comes from the pool, and
-    # N processes x many BLAS threads just oversubscribes the CPU.
+def _die_with_parent(parent_pid: int) -> None:
+    import signal, threading
+    # Linux: kernel sends SIGTERM to this worker the moment the parent exits (even kill -9).
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+        except Exception:
+            pass
+    # Portable fallback (also covers the parent dying before prctl ran):
+    # if we've been reparented, the sweep is gone, so exit.
+    def watch():
+        while True:
+            if os.getppid() != parent_pid:
+                os._exit(1)
+            time.sleep(5)
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def _init_worker(parent_pid: int):
+    _die_with_parent(parent_pid)
     import torch
     torch.set_num_threads(1)
 
 
 def _run_one(task) -> list[dict]:
     """Train + evaluate one config. Top-level so it can run in a worker process."""
-    import reinforcement_learning.Training.train_sac_qat as T
+    import Training.train_sac_qat as T
     meta, argv_run, n_eval, log_path = task
     with contextlib.ExitStack() as st:
         if log_path:                                   # parallel mode: keep logs apart
