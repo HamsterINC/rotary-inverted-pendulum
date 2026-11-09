@@ -390,6 +390,50 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         return (s.time_us, -s.motor_pos_rad, -s.pendulum_pos_rad,
                 -s.motor_vel_rad_s, -s.pendulum_vel_rad_s)
 
+    def loop_timing_summary(self) -> dict:
+        """Per-episode loop timing from the FPGA counters (client.timing_log,
+        cleared at the end of reset(), so it holds this episode's actions).
+
+        fpga_n_actions        actions measured
+        fpga_period_ms        mean action -> action period
+        fpga_period_std_ms    its standard deviation
+        fpga_jitter_pct       period std / mean period * 100
+        fpga_period_max_ms    longest period
+        fpga_delay_ms         mean delay: sample used by the policy -> action
+        fpga_delay_std_ms     its standard deviation
+        fpga_delay_p99_ms     99th percentile delay
+        fpga_delay_max_ms     longest delay
+        fpga_n_late_ticks     actions that saw more new samples than one control
+                              period holds (the loop missed its sample)
+        fpga_n_no_new_sample  actions with no new sample since the previous one
+        Empty dict when the bitstream has no measurement GPIO.
+        """
+        c = self._client
+        if c is None or not c.measure_timing:
+            return {}
+        log = list(c.timing_log)
+        if not log:
+            return {"fpga_n_actions": 0}
+        per = np.array([m.period_s for m in log]) * 1e3
+        dly = np.array([m.delay_s for m in log if m.delay_cycles >= 0]) * 1e3
+        out = {
+            "fpga_n_actions": len(log),
+            "fpga_period_ms": float(per.mean()),
+            "fpga_period_std_ms": float(per.std()),
+            "fpga_jitter_pct": float(100.0 * per.std() / per.mean()),
+            "fpga_period_max_ms": float(per.max()),
+            "fpga_n_late_ticks": sum(1 for m in log if m.n_samples > self._samples_per_tick),
+            "fpga_n_no_new_sample": sum(1 for m in log if m.n_samples == 0),
+        }
+        if dly.size:
+            out.update(
+                fpga_delay_ms=float(dly.mean()),
+                fpga_delay_std_ms=float(dly.std()),
+                fpga_delay_p99_ms=float(np.percentile(dly, 99)),
+                fpga_delay_max_ms=float(dly.max()),
+            )
+        return out
+
     def prepare_control_thread(self) -> None:
         """Apply the realtime settings to the calling thread (once per thread)."""
         if not self.realtime:
@@ -594,6 +638,8 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         self._step_count = 0
         self._obs_history.clear()  # _build_obs reseeds with the initial frame
         self._next_tick = time.monotonic()
+        # FPGA loop timing: keep only this episode's actions (drops homing)
+        client.clear_timing_log()
 
         return self._build_obs(motor_pos, phi), {"homed": homed, "tared": rested,
                                                  "rest_wait_s": self.last_rest_wait_s}

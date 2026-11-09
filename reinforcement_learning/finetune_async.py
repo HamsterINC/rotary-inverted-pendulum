@@ -168,6 +168,15 @@ HERE = Path(__file__).resolve().parent
 RUNS_ROOT = HERE / "runs"
 SYNC_TIMEOUT_S = 5.0   # rig waits this long for the learner's policy sync
 
+# Per-episode loop timing from the FPGA counters (cpu inference, see
+# FPGA_env.loop_timing_summary); appended to timing.csv, logged as time/<key>.
+FPGA_TIMING_KEYS = (
+    "fpga_n_actions", "fpga_period_ms", "fpga_period_std_ms", "fpga_jitter_pct",
+    "fpga_period_max_ms", "fpga_delay_ms", "fpga_delay_std_ms",
+    "fpga_delay_p99_ms", "fpga_delay_max_ms",
+    "fpga_n_late_ticks", "fpga_n_no_new_sample",
+)
+
 
 class MixedReplayBuffer:
     """Two replay buffers (real + frozen sim) behind one SB3-style interface.
@@ -452,7 +461,10 @@ def _cpu_rig_worker(env, snapshot, tq, sync: PolicySync, out: queue.Queue,
                 err = None
             except TimingViolation as e:
                 stats, err = None, e
-            out.put(("episode", ep_i, {"stats": stats, "error": err, **reset_info}, info))
+            fpga_timing = (env.loop_timing_summary()
+                           if hasattr(env, "loop_timing_summary") else {})
+            out.put(("episode", ep_i, {"stats": stats, "error": err,
+                                       "fpga_timing": fpga_timing, **reset_info}, info))
     except KeyboardInterrupt:
         pass                                    # stop requested
     except Exception as err:                    # surface rig errors in the main thread
@@ -965,6 +977,7 @@ def main(argv: list[str] | None = None) -> int:
         "grad_steps", "grad_steps_total", "max_dt_ms", "n_gaps", "n_brake",
         "rest_wait_s", "tared", "weights_grad_step", "upload_s",
         "n_weight_updates", "weights_grad_step_end",
+        *FPGA_TIMING_KEYS,
     ])
     metrics_f = open(run_dir / "metrics.csv", "w", newline="")
     metrics_writer = csv.writer(metrics_f)
@@ -1014,6 +1027,13 @@ def main(argv: list[str] | None = None) -> int:
               f"train_s={train_s_ep:.2f}  weights@{info.get('weights_grad_step', '-')}"
               f"→{info.get('weights_grad_step_end', '-')} "
               f"({info.get('n_weight_updates', 0)} mid-episode updates)")
+        if timing.get("fpga_period_ms") is not None:
+            print(f"  fpga loop: period={_fmt(timing['fpga_period_ms'])}ms  "
+                  f"jitter={_fmt(timing['fpga_jitter_pct'], '.2f')}%  "
+                  f"delay={_fmt(timing.get('fpga_delay_ms', nan))}ms "
+                  f"(p99 {_fmt(timing.get('fpga_delay_p99_ms', nan))}, "
+                  f"max {_fmt(timing.get('fpga_delay_max_ms', nan))})  "
+                  f"late ticks={timing['fpga_n_late_ticks']}")
         print(f"  buffers: real={real_buf.size()}  sim={sim_buf.size()}  "
               f"real share of batch={_fmt(real_frac_now)}")
         print(f"  [{mode}] balanced={'yes' if m['balanced'] else 'no'}  "
@@ -1038,6 +1058,9 @@ def main(argv: list[str] | None = None) -> int:
             "" if reset.get("tared") is None else int(reset["tared"]),
             info.get("weights_grad_step", ""), cell(info.get("upload_s"), ".4f"),
             info.get("n_weight_updates", 0), info.get("weights_grad_step_end", ""),
+            *[("" if timing.get(k) is None
+               else timing[k] if isinstance(timing[k], int) else cell(timing[k]))
+              for k in FPGA_TIMING_KEYS],
         ])
         timing_f.flush()
         metrics_writer.writerow([
@@ -1101,6 +1124,10 @@ def main(argv: list[str] | None = None) -> int:
             v = timing.get(key)
             if v is not None and not (isinstance(v, float) and math.isnan(v)):
                 lg.record(tb, v)
+        for key in FPGA_TIMING_KEYS:
+            v = timing.get(key)
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                lg.record(f"time/{key}", v)
         if reset.get("rest_wait_s") is not None:
             lg.record("rig/rest_wait_s", reset["rest_wait_s"])
         if reset.get("tared") is not None:
@@ -1160,7 +1187,8 @@ def main(argv: list[str] | None = None) -> int:
                           "metrics unavailable for this episode.", file=sys.stderr)
                 ts = stats.tick_stats
                 timing = dict(mean_dt_ms=stats.mean_dt_ms, std_dt_ms=stats.std_dt_ms,
-                              max_overrun_ms=ts.max_overrun_ms, n_violations=ts.n_violations)
+                              max_overrun_ms=ts.max_overrun_ms, n_violations=ts.n_violations,
+                              **(payload.get("fpga_timing") or {}))
                 _report(ep_i, mode, ret=stats.cumulative_reward, n_steps=stats.n_steps,
                         terminated=stats.terminated, truncated=stats.truncated,
                         m=m, timing=timing, info=info, reset=reset)
