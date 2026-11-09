@@ -800,6 +800,7 @@ def main(argv: list[str] | None = None) -> int:
         from Deploy.FPGA.FPGA_env import RealRotaryInvertedPendulumEnv
         env_overrides.update(port=args.port, baud=args.baud, max_accel_rad_s2=max_accel)
         env = RealRotaryInvertedPendulumEnv.from_config(cfg, **env_overrides)
+        env._ensure_open()  # open the overlay here (PYNQ wants the main thread), not in the rig thread
     print(f"Control: {control_freq:g} Hz, max accel {max_accel:g} rad/s²")
 
     reward_overrides = {k: v for k, v in env_overrides.items() if k.startswith("reward_")}

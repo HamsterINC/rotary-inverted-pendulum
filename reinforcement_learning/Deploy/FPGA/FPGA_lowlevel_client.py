@@ -21,6 +21,7 @@ Behaviour matches the C firmware (ll_poll / handle_set_accel):
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import math
 import os
@@ -186,6 +187,12 @@ class FpgaLowLevelClient:
             raise FileNotFoundError(f"Hardware bitstream/XSA not found at: {bit_path}")
 
         print(f"Programming FPGA overlay from: {bit_path.name} (download={download})")
+        # PYNQ's device probe calls asyncio.get_event_loop(), which fails in a
+        # non-main thread that has no loop yet; give such a thread its own.
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         self.ol = Overlay(str(bit_path), download=download)
 
         try:
