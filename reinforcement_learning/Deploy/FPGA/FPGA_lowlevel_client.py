@@ -51,6 +51,8 @@ TARE_SETTLE_S    = 0.005                 # > one 2 ms sample + pipeline
 # PL sample clock (training_pipeline SAMPLE_HZ); time_us steps by this per sample
 SAMPLE_HZ        = 500
 SAMPLE_PERIOD_US = 1_000_000 // SAMPLE_HZ
+SYNC_EDGE_MAX_S    = 200e-6   # sample edge must be pinned this tightly to learn the offset
+SYNC_REF_MAX_AGE_S = 2.0      # older PL<->PS offsets are re-learnt (crystal drift)
 
 # Loop-timing GPIO fields (must match training_pipeline.sv)
 MEAS_CNT_BITS = 24
@@ -223,6 +225,7 @@ class FpgaLowLevelClient:
         self._used_sample_cyc: int | None = None  # stamp of the last state handed out
         self._sync_ref: tuple[float, int] | None = None  # (perf_counter, time_us) pair
         self.n_torn_reads = 0                     # state reads retried for tearing
+        self.n_sync_misses = 0                    # waits that woke after their sample
 
         self.gpio_step = MMIO(gpio_step_addr, 0x1000)
         self.gpio_pen  = MMIO(gpio_pen_addr,  0x1000)
@@ -401,7 +404,13 @@ class FpgaLowLevelClient:
         Sleeps until ~spin_s before the sample is due, then busy-polls the
         time_us register, so the wake-up error of time.sleep is absorbed and
         the sample is seen within a few microseconds. The PL<->perf_counter
-        offset is learnt from the last sample edge seen while spinning.
+        offset is learnt from the last sample edge seen while spinning, and
+        only from an edge pinned down to < SYNC_EDGE_MAX_S (a GIL handoff or
+        preemption mid-poll would otherwise bias it late). If a wait based on
+        that offset still wakes after the sample, the offset was too late:
+        it is dropped and the next wait spins long enough to learn it again.
+        Offsets older than SYNC_REF_MAX_AGE_S (e.g. across a reset) are not
+        trusted, so PS/PL crystal drift cannot build up.
         Raises TimeoutError (an OSError) if no such sample arrives in time.
         Does not take the client lock, so disengage from another thread is
         never blocked.
@@ -410,26 +419,34 @@ class FpgaLowLevelClient:
         t = self.read_time_us()
         remaining_us = us_diff(target_time_us, t)
         if remaining_us <= tol:
-            return t
+            return t                      # caller is late; not a prediction error
         now = time.perf_counter()
-        if self._sync_ref is not None:
-            perf_ref, t_ref = self._sync_ref
-            due = perf_ref + us_diff(target_time_us, t_ref) * 1e-6
+        used_ref = False
+        ref = self._sync_ref
+        if ref is not None and now - ref[0] < SYNC_REF_MAX_AGE_S:
+            due = ref[0] + us_diff(target_time_us, ref[1]) * 1e-6
+            used_ref = True
         else:
             # the newest sample may already be up to one period old
             due = now + (remaining_us - SAMPLE_PERIOD_US) * 1e-6
         if due - spin_s > now:
             time.sleep(due - spin_s - now)
         hard_deadline = now + remaining_us * 1e-6 + timeout_s
-        saw_old = False
+        p_old = None                      # when the last old-value read started
         while True:
+            p0 = time.perf_counter()
             t = self.read_time_us()
+            p1 = time.perf_counter()
             if us_diff(t, target_time_us) >= -tol:
-                if saw_old:
-                    self._sync_ref = (time.perf_counter(), t)
+                if p_old is not None:
+                    if p1 - p_old < SYNC_EDGE_MAX_S:
+                        self._sync_ref = (0.5 * (p_old + p1), t)
+                elif used_ref:
+                    self._sync_ref = None # woke after the sample: relearn
+                    self.n_sync_misses += 1
                 return t
-            saw_old = True
-            if time.perf_counter() > hard_deadline:
+            p_old = p0
+            if p1 > hard_deadline:
                 raise TimeoutError(
                     f"no PL sample at time_us={target_time_us} (newest {t}); "
                     "is the PL running?")
@@ -439,6 +456,7 @@ class FpgaLowLevelClient:
         since it spans the pause before it."""
         with self._lock:
             self.timing_log.clear()
+            self.n_sync_misses = 0
             self._skip_next = True
 
     def engage_motor(self) -> None:

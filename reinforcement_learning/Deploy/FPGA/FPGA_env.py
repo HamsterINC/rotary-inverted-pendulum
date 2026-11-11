@@ -406,6 +406,8 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         fpga_n_late_ticks     actions that saw more new samples than one control
                               period holds (the loop missed its sample)
         fpga_n_no_new_sample  actions with no new sample since the previous one
+        fpga_n_sync_misses    sample waits that woke after their sample (the
+                              learnt PL clock offset was off; re-learnt)
         Empty dict when the bitstream has no measurement GPIO.
         """
         c = self._client
@@ -424,6 +426,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
             "fpga_period_max_ms": float(per.max()),
             "fpga_n_late_ticks": sum(1 for m in log if m.n_samples > self._samples_per_tick),
             "fpga_n_no_new_sample": sum(1 for m in log if m.n_samples == 0),
+            "fpga_n_sync_misses": c.n_sync_misses,
         }
         if dly.size:
             out.update(

@@ -174,7 +174,7 @@ FPGA_TIMING_KEYS = (
     "fpga_n_actions", "fpga_period_ms", "fpga_period_std_ms", "fpga_jitter_pct",
     "fpga_period_max_ms", "fpga_delay_ms", "fpga_delay_std_ms",
     "fpga_delay_p99_ms", "fpga_delay_max_ms",
-    "fpga_n_late_ticks", "fpga_n_no_new_sample",
+    "fpga_n_late_ticks", "fpga_n_no_new_sample", "fpga_n_sync_misses",
 )
 
 
@@ -588,6 +588,10 @@ def main(argv: list[str] | None = None) -> int:
                         "is multiplied by uniform(1-frac, 1+frac). Default 0.05 "
                         "matches the sim DR_CONTROL_DT_JITTER_FRAC constant. "
                         "0.0 = strict reproducible timing.")
+    p.add_argument("--no-sample-sync", action="store_true",
+                   help="[cpu] pace the control loop on time.perf_counter (the old "
+                        "behaviour) instead of waiting for the FPGA's 2 ms samples. "
+                        "For A/B tests of the loop timing.")
     p.add_argument("--eval-dt-jitter-frac", type=float, default=0.0,
                    help="[cpu] dt jitter during eval episodes. Default 0 (strict "
                         "timing, as deployed).")
@@ -810,7 +814,12 @@ def main(argv: list[str] | None = None) -> int:
         _ = env.client      # open the overlay here (checks the bitstream), not in the rig thread
     else:
         from Deploy.FPGA.FPGA_env import RealRotaryInvertedPendulumEnv
-        env_overrides.update(port=args.port, baud=args.baud, max_accel_rad_s2=max_accel)
+        env_overrides.update(port=args.port, baud=args.baud, max_accel_rad_s2=max_accel,
+                             sample_sync=not args.no_sample_sync)
+        if not args.no_sample_sync and args.dt_jitter_frac * 1e6 / control_freq < 1000.0:
+            print(f"note: --dt-jitter-frac {args.dt_jitter_frac:g} is below half a 2 ms "
+                  "FPGA sample at this rate, so the sample-synced loop runs strict "
+                  "timing (use --no-sample-sync for sub-sample dt jitter)")
         env = RealRotaryInvertedPendulumEnv.from_config(cfg, **env_overrides)
         env._ensure_open()  # open the overlay here (PYNQ wants the main thread), not in the rig thread
     print(f"Control: {control_freq:g} Hz, max accel {max_accel:g} rad/s²")
