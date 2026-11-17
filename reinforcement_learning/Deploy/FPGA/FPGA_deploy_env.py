@@ -65,6 +65,7 @@ from gymnasium import spaces
 from Deploy.FPGA.deploy_client import (
     ACCEL_FULL_SCALE,
     PL_CONTROL_HZ,
+    PL_CLOCK_HZ,
     FpgaDeployClient,
     LogOverrun,
     StepRecord,
@@ -93,6 +94,67 @@ HOME_ACCEL_SIGN = 1.0      # PS accel and motor angle share the PL frame
 
 FRAME_DIM = 6
 FIRST_STEP_TIMEOUT_S = 1.0     # engage -> first inference (SETTLE_TICKS + 1-2 ticks)
+
+
+def pl_loop_timing(records, control_hz: float) -> dict:
+    """Loop timing of one PL episode from the step-log cycle stamps, with the
+    same keys as FPGA_env.loop_timing_summary (plus the PL-only delay split):
+
+    fpga_n_actions       actions measured
+    fpga_period_ms       mean action -> action period (consecutive steps only)
+    fpga_period_std_ms   its standard deviation
+    fpga_jitter_pct      period std / mean period * 100
+    fpga_period_max_ms   longest period
+    fpga_delay_ms        mean delay: sample in the observation -> action
+    fpga_delay_std_ms / fpga_delay_p99_ms / fpga_delay_max_ms
+    fpga_obs_age_ms      mean sample -> inference start
+    fpga_compute_ms      mean inference start -> action
+    fpga_n_late_ticks    periods longer than 1.5 control periods (missed tick)
+    Empty dict when the bitstream logs no stamps (8-word records).
+    """
+    recs = [r for r in records if r is not None and r.action_cyc is not None]
+    if not recs:
+        return {}
+    ms = 1e3 / PL_CLOCK_HZ
+    per = np.array([((b.action_cyc - a.action_cyc) & 0xFFFFFFFF) * ms
+                    for a, b in zip(recs, recs[1:])
+                    if b.episode_step == a.episode_step + 1])
+    dly = np.array([r.delay_cyc for r in recs]) * ms
+    out = {
+        "fpga_n_actions": len(recs),
+        "fpga_delay_ms": float(dly.mean()),
+        "fpga_delay_std_ms": float(dly.std()),
+        "fpga_delay_p99_ms": float(np.percentile(dly, 99)),
+        "fpga_delay_max_ms": float(dly.max()),
+        "fpga_obs_age_ms": float(np.mean([r.obs_age_cyc for r in recs]) * ms),
+        "fpga_compute_ms": float(np.mean([r.compute_cyc for r in recs]) * ms),
+    }
+    if per.size:
+        out.update(
+            fpga_period_ms=float(per.mean()),
+            fpga_period_std_ms=float(per.std()),
+            fpga_jitter_pct=float(100.0 * per.std() / per.mean()),
+            fpga_period_max_ms=float(per.max()),
+            fpga_n_late_ticks=int(np.sum(per > 1.5e3 / control_hz)),
+        )
+    return out
+
+
+def pl_step_timing(records) -> dict | None:
+    """Per-action timing arrays (step_timing.csv / compare_jitter.py), same
+    measurements as pl_loop_timing; compute_us = PL inference start -> action."""
+    recs = [r for r in records if r is not None and r.action_cyc is not None]
+    if len(recs) < 2:
+        return None
+    ms = 1e3 / PL_CLOCK_HZ
+    pairs = [(a, b) for a, b in zip(recs, recs[1:]) if b.episode_step == a.episode_step + 1]
+    return {
+        "step": np.array([b.episode_step for _, b in pairs]),
+        "period_ms": np.array([((b.action_cyc - a.action_cyc) & 0xFFFFFFFF) * ms
+                               for a, b in pairs]),
+        "delay_ms": np.array([b.delay_cyc * ms for _, b in pairs]),
+        "compute_us": np.array([b.compute_cyc * ms * 1e3 for _, b in pairs]),
+    }
 
 
 class FpgaDeployEnv(gym.Env):
@@ -451,6 +513,7 @@ class FpgaDeployEnv(gym.Env):
         swaps weight banks between two inferences)."""
         obs, reset_info = self.reset(options={"before_start": before_start})
         O, A, R, O2, T, V, dts, gaps, brakes = [], [], [], [], [], [], [], [], []
+        records = [reset_info.get("record")]     # for the loop-timing summary
         trunc = False
         try:
             while True:
@@ -458,6 +521,7 @@ class FpgaDeployEnv(gym.Env):
                 O.append(obs); A.append(info["action"]); R.append(r); O2.append(nxt)
                 T.append(term); V.append(not (info["gap"] or info["brake"]))
                 dts.append(info["dt_s"]); gaps.append(info["gap"]); brakes.append(info["brake"])
+                records.append(info["record"])
                 obs = nxt
                 if term or trunc:
                     break
@@ -487,6 +551,8 @@ class FpgaDeployEnv(gym.Env):
             "homed": bool(reset_info["homed"]),
             "tared": bool(reset_info["tared"]),
             "rest_wait_s": self.last_rest_wait_s,
+            "pl_timing": pl_loop_timing(records, self.control_freq_hz),
+            "step_timing": pl_step_timing(records),
         }
 
     def disengage_safely(self) -> None:

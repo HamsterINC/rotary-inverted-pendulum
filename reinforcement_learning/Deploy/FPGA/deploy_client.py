@@ -83,6 +83,7 @@ PL_CONTROL_HZ    = 50.0          # default only; the bitstream reports its rate 
 SAFE_LIMIT_RAD   = 2.1816616     # PL rail brake (125 deg)
 
 TARE_SETTLE_S    = 0.005         # > one 2 ms sample + pipeline
+PL_CLOCK_HZ      = 100e6         # core clock: unit of the loop-timing stamps
 
 
 def _to_int16(val: int) -> int:
@@ -138,6 +139,31 @@ class StepRecord:
     motor_counts: int            # motor encoder counts since the last tare
     episode: int                 # PL engage counter
     explored: bool = False       # SAC head sampled this action (DEPLOY_CTRL explore bit)
+    # loop-timing cycle stamps (16-word log records; None on older bitstreams)
+    sample_cyc: int | None = None   # sample in the newest observation frame (state_done)
+    infer_cyc: int | None = None    # inference start (inputs frozen)
+    action_cyc: int | None = None   # action ready for the step generator
+
+    @property
+    def obs_age_cyc(self) -> int | None:
+        """Sample -> inference start: how old the observation was."""
+        if self.sample_cyc is None:
+            return None
+        return (self.infer_cyc - self.sample_cyc) & 0xFFFFFFFF
+
+    @property
+    def compute_cyc(self) -> int | None:
+        """Inference start -> action (network + SAC head)."""
+        if self.infer_cyc is None:
+            return None
+        return (self.action_cyc - self.infer_cyc) & 0xFFFFFFFF
+
+    @property
+    def delay_cyc(self) -> int | None:
+        """Sample -> action: the PL's sensing-to-actuation delay."""
+        if self.sample_cyc is None:
+            return None
+        return (self.action_cyc - self.sample_cyc) & 0xFFFFFFFF
 
     @classmethod
     def from_words(cls, index: int, w: np.ndarray) -> "StepRecord":
@@ -160,6 +186,9 @@ class StepRecord:
             motor_counts=_to_int32(int(w[6])),
             episode=int(w[7]),
             explored=bool(flags & 8),
+            sample_cyc=int(w[8]) if len(w) > 10 else None,
+            infer_cyc=int(w[9]) if len(w) > 10 else None,
+            action_cyc=int(w[10]) if len(w) > 10 else None,
         )
 
 

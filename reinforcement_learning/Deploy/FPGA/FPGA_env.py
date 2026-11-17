@@ -437,6 +437,20 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
             )
         return out
 
+    def loop_timing_steps(self) -> dict | None:
+        """Per-action timing of this episode (same measurements as
+        loop_timing_summary) for step_timing.csv / compare_jitter.py."""
+        c = self._client
+        if c is None or not c.measure_timing:
+            return None
+        log = list(c.timing_log)
+        return {
+            "step": np.arange(1, len(log) + 1),        # action 0's period spans the pause
+            "period_ms": np.array([m.period_s for m in log]) * 1e3,
+            "delay_ms": np.array([m.delay_s for m in log]) * 1e3,   # nan when unknown
+            "compute_us": None,
+        }
+
     def prepare_control_thread(self) -> None:
         """Apply the realtime settings to the calling thread (once per thread)."""
         if not self.realtime:

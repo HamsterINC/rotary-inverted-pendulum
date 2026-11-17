@@ -1,11 +1,15 @@
 """Asynchronous SAC fine-tuning on the real rig — policy inference on the CPU
-or on the PL, selected with --inference. Everything else is shared, so the two
-deployment methods can be compared one-to-one.
+(Python on Linux), on the PL, or bare metal on the Cortex-R5F, selected with
+--inference. Everything else is shared, so the three deployment methods can be
+compared one-to-one (compare_jitter.py tabulates their loop timing).
 
     python finetune_async.py runs/<run> --inference cpu --port /dev/ttyPS1 --episodes 50
     python finetune_async.py runs/<run> --inference pl  --episodes 50
+    python finetune_async.py runs/<run> --inference baremetal --episodes 50
+        (rpu_policy.elf loaded on the R5 first, e.g. over JTAG; see
+        Deploy/FPGA/rpu_firmware/README.md)
 
-Threads (same for both modes):
+Threads (same for all modes):
 
   Rig thread — owns all rig I/O. Per episode:
       PD-home the motor -> short stillness check (--rest-check-s): tare only
@@ -19,6 +23,11 @@ Threads (same for both modes):
         pl : the PL runs the MLP itself; the CPU only observes the step log
              and gets exact (obs, action) pairs at the end of the episode.
              Env: Deploy/FPGA/FPGA_deploy_env.FpgaDeployEnv (deployment bitstream).
+        baremetal: Linux on the A53s only learns and supervises; the R5F runs
+             the cpu path's control loop in C with no OS (rpu_firmware/),
+             locked to the PL samples, on the low-level bitstream, and logs
+             every tick to shared memory. Env:
+             Deploy/FPGA/FPGA_rpu_env.RpuRotaryInvertedPendulumEnv.
 
   Main thread (learner) — trains SAC continuously in chunks of
       --gradient-steps while episodes run, the motor homes and the pendulum
@@ -35,6 +44,9 @@ Policy sync (--weight-sync):
                        double-buffered weight memory at most every
                        --pl-upload-interval-s; the PL swaps banks between two
                        inferences.
+                  baremetal: float32 weights written to the inactive bank in
+                       shared memory at most every --pl-upload-interval-s; the
+                       R5 swaps banks between two inferences.
     episode     the policy is fixed for a whole episode (newest weights when
                 it starts).
     Eval episodes always keep one fixed policy. With --param-noise the noise is
@@ -42,7 +54,8 @@ Policy sync (--weight-sync):
     SAME noise draw and only the training updates change the PL weights.
 
 Exploration:
-    cpu: stochastic SAC actions (unless --deterministic) + dt jitter.
+    cpu, baremetal: stochastic SAC actions (unless --deterministic) + dt
+      jitter; the R5 samples tanh(mu + std*eps) itself, reseeded per episode.
     pl (--pl-explore):
       sac   (default) the PL samples SAC's own stochastic action
             tanh(mu + exp(log_std) * eps) with its LFSR noise generator
@@ -112,7 +125,9 @@ Fine-tuning metrics (finetune_metrics.py):
     frac_upright_after_catch, theta_rms_deg, motor_pos_std_deg,
     mean_abs_action_balanced, dropped, plus gradient steps.
 
-    Written to <run>/metrics.csv (mode = train|eval), <run>/timing.csv and
+    Written to <run>/metrics.csv (mode = train|eval), <run>/timing.csv,
+    <run>/step_timing.csv (one row per action: PL-measured period and
+    sample->action delay, the input of compare_jitter.py) and
     TensorBoard (rollout/* for training episodes, eval/* for evals), with
     real transitions collected and rig minutes as the x-axes. The best eval
     policy is saved as best_eval.zip, and eval_summary.json records baseline
@@ -126,6 +141,7 @@ import copy
 import csv
 import json
 import math
+import os
 import queue
 import signal
 import sys
@@ -175,6 +191,8 @@ FPGA_TIMING_KEYS = (
     "fpga_period_max_ms", "fpga_delay_ms", "fpga_delay_std_ms",
     "fpga_delay_p99_ms", "fpga_delay_max_ms",
     "fpga_n_late_ticks", "fpga_n_no_new_sample", "fpga_n_sync_misses",
+    "fpga_obs_age_ms", "fpga_compute_ms",          # pl inference only
+    "rpu_compute_us", "rpu_compute_max_us",        # baremetal inference only
 )
 
 
@@ -463,8 +481,11 @@ def _cpu_rig_worker(env, snapshot, tq, sync: PolicySync, out: queue.Queue,
                 stats, err = None, e
             fpga_timing = (env.loop_timing_summary()
                            if hasattr(env, "loop_timing_summary") else {})
+            step_timing = (env.loop_timing_steps()
+                           if hasattr(env, "loop_timing_steps") else None)
             out.put(("episode", ep_i, {"stats": stats, "error": err,
-                                       "fpga_timing": fpga_timing, **reset_info}, info))
+                                       "fpga_timing": fpga_timing,
+                                       "step_timing": step_timing, **reset_info}, info))
     except KeyboardInterrupt:
         pass                                    # stop requested
     except Exception as err:                    # surface rig errors in the main thread
@@ -539,6 +560,62 @@ def _pl_rig_worker(env, sync: PolicySync, latest: LatestWeights | None,
         out.put(("done",))
 
 
+def _rpu_rig_worker(env, sync: PolicySync, latest: LatestWeights | None,
+                    out: queue.Queue, stop: threading.Event, *, n_episodes: int,
+                    min_upload_interval_s: float) -> None:
+    """Bare-metal inference: reset (home, still, tare, upload newest weights)
+    then the R5 runs the episode; this thread only supervises it (heartbeat,
+    newer weights between ticks with continuous sync, reading the log)."""
+    try:
+        for ep_i in range(n_episodes):
+            if stop.is_set():
+                break
+            info: dict = {"n_weight_updates": 0}
+            uploaded = {"version": -1, "t": 0.0}
+
+            def before_start():
+                params, meta = sync.request(SYNC_TIMEOUT_S, ep_i)
+                info.update(meta, synced=params is not None)
+                env.next_explore = bool(params is not None and meta.get("explore"))
+                env.next_seed = int(meta.get("noise_seed", ep_i + 1))
+                env.next_dt_jitter = meta.get("dt_jitter")
+                info["explored"] = env.next_explore
+                if params is None:
+                    print("  [warn] learner did not provide weights in time; "
+                          "reusing the previous ones")
+                    return
+                t0 = time.monotonic()
+                env.rpu.load_weights(params)
+                info.update(upload_s=time.monotonic() - t0,
+                            weights_grad_step_end=meta.get("weights_grad_step", -1))
+                uploaded.update(version=meta.get("version", -1), t=time.monotonic())
+
+            def on_step():
+                ep, ver, params, gs = latest.get()
+                if ep != ep_i or ver <= uploaded["version"] or params is None:
+                    return
+                if time.monotonic() - uploaded["t"] < min_upload_interval_s:
+                    return
+                t0 = time.monotonic()
+                env.rpu.load_weights(params)
+                dt = time.monotonic() - t0
+                uploaded.update(version=ver, t=time.monotonic())
+                info["n_weight_updates"] += 1
+                info["weights_grad_step_end"] = gs
+                info["max_upload_s"] = max(info.get("max_upload_s", 0.0), dt)
+
+            ep = env.collect_episode(before_start=before_start,
+                                     on_step=on_step if latest is not None else None)
+            out.put(("episode", ep_i, ep, info))
+    except KeyboardInterrupt:
+        pass
+    except Exception as err:
+        out.put(("error", err))
+    finally:
+        env.disengage_safely()
+        out.put(("done",))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -550,10 +627,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="run folder to start from (sim training run or a "
                         "previous fine-tune run). config.json, the "
                         "checkpoint and the replay buffers are found inside.")
-    p.add_argument("--inference", choices=("cpu", "pl"), default="cpu",
+    p.add_argument("--inference", choices=("cpu", "pl", "baremetal"), default="cpu",
                    help="where the policy runs: 'cpu' = PS control loop over the "
                         "low-level bitstream (FPGA_env), 'pl' = MLP on the PL "
-                        "(deployment bitstream, FPGA_deploy_env)")
+                        "(deployment bitstream, FPGA_deploy_env), 'baremetal' = "
+                        "C control loop on the Cortex-R5F over the low-level "
+                        "bitstream (FPGA_rpu_env); Linux only learns")
     p.add_argument("--weight-sync", choices=("continuous", "episode"),
                    default="continuous",
                    help="'continuous' = weights also updated during the episode "
@@ -561,8 +640,8 @@ def main(argv: list[str] | None = None) -> int:
                         "double-buffered weights every --pl-upload-interval-s). "
                         "'episode' = policy fixed per episode")
     p.add_argument("--pl-upload-interval-s", type=float, default=0.2,
-                   help="[pl] min seconds between mid-episode weight uploads "
-                        "(continuous sync). Each export costs learner time.")
+                   help="[pl, baremetal] min seconds between mid-episode weight "
+                        "uploads (continuous sync). Each export costs learner time.")
     p.add_argument("--checkpoint", default="auto",
                    help="which checkpoint in the run folder: 'auto' "
                         "(best_model.zip if present, else last.zip), 'best', "
@@ -580,11 +659,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="[cpu] port for the low-level client")
     p.add_argument("--baud", type=int, default=1_000_000)
     p.add_argument("--deterministic", action="store_true",
-                   help="[cpu] deterministic actions during data collection. "
+                   help="[cpu, baremetal] deterministic actions during data collection. "
                         "Default is stochastic, matching SAC training-time "
                         "behaviour and what the policy was optimised for.")
     p.add_argument("--dt-jitter-frac", type=float, default=0.05,
-                   help="[cpu] control-rate jitter (DR on dt). Each tick interval "
+                   help="[cpu, baremetal] control-rate jitter (DR on dt). Each tick interval "
                         "is multiplied by uniform(1-frac, 1+frac). Default 0.05 "
                         "matches the sim DR_CONTROL_DT_JITTER_FRAC constant. "
                         "0.0 = strict reproducible timing.")
@@ -593,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
                         "behaviour) instead of waiting for the FPGA's 2 ms samples. "
                         "For A/B tests of the loop timing.")
     p.add_argument("--eval-dt-jitter-frac", type=float, default=0.0,
-                   help="[cpu] dt jitter during eval episodes. Default 0 (strict "
+                   help="[cpu, baremetal] dt jitter during eval episodes. Default 0 (strict "
                         "timing, as deployed).")
     p.add_argument("--timing-violation-threshold-ms", type=float, default=10.0,
                    help="[cpu] control-loop overrun above this for 3 consecutive "
@@ -611,6 +690,25 @@ def main(argv: list[str] | None = None) -> int:
                    help="[pl] deployment .xsa/.bit (default: FpgaDeployClient's)")
     p.add_argument("--no-download", action="store_true",
                    help="[pl] overlay already loaded")
+    # --- baremetal inference (low-level bitstream + R5 firmware) ---
+    p.add_argument("--rpu-firmware", default=None,
+                   help="[baremetal] R5 ELF to (re)start through remoteproc "
+                        "(Deploy/FPGA/rpu_firmware/rpu_policy.elf). Default: the "
+                        "firmware is already running (e.g. started over JTAG)")
+    p.add_argument("--rpu-rproc", default="remoteproc0",
+                   help="[baremetal] remoteproc instance of R5 core 0")
+    p.add_argument("--rpu-shm-base", type=lambda s: int(s, 0), default=None,
+                   help="[baremetal] fixed physical base of a device-tree-reserved "
+                        "shared window. Default: allocate it with pynq.allocate "
+                        "(works on the stock PYNQ image)")
+    p.add_argument("--rpu-host-timeout-ms", type=int, default=1000,
+                   help="[baremetal] the R5 disengages the motor if the rig "
+                        "thread stops supervising for this long (0 = off)")
+    # --- core placement (all modes) ---
+    p.add_argument("--learner-cpu", type=int, default=None,
+                   help="pin the learner (main thread) to this A53 core; the rig "
+                        "thread keeps all cores. Use the same value for all three "
+                        "--inference modes so the jitter comparison is fair")
     # --- episodes / reset ---
     p.add_argument("--episodes", type=int, default=50,
                    help="number of real-device episodes to collect")
@@ -708,10 +806,11 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 2
     use_pl = args.inference == "pl"
+    use_rpu = args.inference == "baremetal"
     weight_sync = args.weight_sync
     if not use_pl and (args.param_noise > 0 or args.pl_explore is not None):
-        print("ERROR: --param-noise / --pl-explore are for --inference pl; cpu "
-              "explores with stochastic actions", file=sys.stderr)
+        print(f"ERROR: --param-noise / --pl-explore are for --inference pl; "
+              f"{args.inference} explores with stochastic actions", file=sys.stderr)
         return 2
     if args.pl_explore is None:
         args.pl_explore = "param" if args.param_noise > 0 else "sac"
@@ -723,7 +822,8 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: --pl-explore param needs --param-noise > 0", file=sys.stderr)
         return 2
     if use_pl and (args.deterministic or args.dt_jitter_frac != 0.05):
-        print("note: --deterministic / --dt-jitter-frac only apply to --inference cpu")
+        print("note: --deterministic / --dt-jitter-frac only apply to --inference "
+              "cpu / baremetal")
 
     torch.set_num_threads(1)
     sys.setswitchinterval(0.001)   # rig thread gets the GIL back quickly between torch ops
@@ -812,6 +912,18 @@ def main(argv: list[str] | None = None) -> int:
             env_overrides["bitstream_path"] = args.bitstream
         env = FpgaDeployEnv.from_config(cfg, **env_overrides)
         _ = env.client      # open the overlay here (checks the bitstream), not in the rig thread
+    elif use_rpu:
+        from Deploy.FPGA.FPGA_rpu_env import RpuRotaryInvertedPendulumEnv
+        if args.no_sample_sync:
+            print("note: --no-sample-sync has no effect with --inference baremetal "
+                  "(the R5 always waits for the PL samples)")
+        env_overrides.update(port=args.port, baud=args.baud, max_accel_rad_s2=max_accel,
+                             rpu_firmware=args.rpu_firmware, rpu_rproc=args.rpu_rproc,
+                             rpu_shm_base=args.rpu_shm_base,
+                             rpu_host_timeout_ms=args.rpu_host_timeout_ms,
+                             dt_jitter_frac=args.dt_jitter_frac)
+        env = RpuRotaryInvertedPendulumEnv.from_config(cfg, **env_overrides)
+        env._ensure_open()  # overlay + R5 handshake in the main thread
     else:
         from Deploy.FPGA.FPGA_env import RealRotaryInvertedPendulumEnv
         env_overrides.update(port=args.port, baud=args.baud, max_accel_rad_s2=max_accel,
@@ -835,7 +947,10 @@ def main(argv: list[str] | None = None) -> int:
                    "real_buffer": real_buffer_path.name if real_buffer_path else None,
                    "inference": args.inference,
                    "weight_sync": weight_sync,
-                   "pl_upload_interval_s": args.pl_upload_interval_s if use_pl else None,
+                   "pl_upload_interval_s": (args.pl_upload_interval_s
+                                            if use_pl or use_rpu else None),
+                   "rpu_firmware": args.rpu_firmware if use_rpu else None,
+                   "learner_cpu": args.learner_cpu,
                    "rest_check_s": args.rest_check_s,
                    "pl_explore": args.pl_explore if use_pl else None,
                    "param_noise": args.param_noise if use_pl else None,
@@ -867,6 +982,8 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
     )
     model.tensorboard_log = str(run_dir / "tb")
+    if use_rpu:
+        env.configure_policy(model.actor)   # net dims + obs layout -> R5
 
     # ---- Replay buffers ----
     # The buffer load_sac_for_finetune built is still empty and has the right
@@ -955,6 +1072,17 @@ def main(argv: list[str] | None = None) -> int:
             rng = np.random.default_rng([args.seed, ep])
             return actor_to_pl_words(model.actor, param_noise_std=noise, rng=rng,
                                      warn=(ep == 0)), noise
+    elif use_rpu:
+        from Deploy.FPGA.rpu_client import actor_to_rpu_params
+        snapshot = tq = None
+        latest = LatestWeights() if weight_sync == "continuous" else None
+        rig = threading.Thread(target=_rpu_rig_worker, name="rig", daemon=True,
+                               args=(env, sync, latest, msgs, stop),
+                               kwargs=dict(n_episodes=args.episodes,
+                                           min_upload_interval_s=0.0))
+
+        def export_words(ep: int, is_eval: bool):
+            return actor_to_rpu_params(model.actor), 0.0
     else:
         snapshot = PolicySnapshot(model.actor, device=args.device)
         tq = TransitionQueue(maxlen=4096)
@@ -988,6 +1116,10 @@ def main(argv: list[str] | None = None) -> int:
         "n_weight_updates", "weights_grad_step_end",
         *FPGA_TIMING_KEYS,
     ])
+    step_timing_f = open(run_dir / "step_timing.csv", "w", newline="")
+    step_timing_writer = csv.writer(step_timing_f)
+    step_timing_writer.writerow(["inference", "episode", "mode", "step",
+                                 "period_ms", "delay_ms", "compute_us"])
     metrics_f = open(run_dir / "metrics.csv", "w", newline="")
     metrics_writer = csv.writer(metrics_f)
     metrics_writer.writerow([
@@ -1042,7 +1174,10 @@ def main(argv: list[str] | None = None) -> int:
                   f"delay={_fmt(timing.get('fpga_delay_ms', nan))}ms "
                   f"(p99 {_fmt(timing.get('fpga_delay_p99_ms', nan))}, "
                   f"max {_fmt(timing.get('fpga_delay_max_ms', nan))})  "
-                  f"late ticks={timing['fpga_n_late_ticks']}")
+                  f"late ticks={timing['fpga_n_late_ticks']}"
+                  + (f"  R5 compute={_fmt(timing['rpu_compute_us'], '.0f')}us "
+                     f"(max {_fmt(timing['rpu_compute_max_us'], '.0f')})"
+                     if timing.get("rpu_compute_us") is not None else ""))
         print(f"  buffers: real={real_buf.size()}  sim={sim_buf.size()}  "
               f"real share of batch={_fmt(real_frac_now)}")
         print(f"  [{mode}] balanced={'yes' if m['balanced'] else 'no'}  "
@@ -1150,27 +1285,43 @@ def main(argv: list[str] | None = None) -> int:
             _save_artifacts(model, real_buf, run_dir, suffix=f"ep{ep_i + 1:03d}")
 
     def _finish_episode(ep_i: int, payload, info: dict) -> None:
-        """Buffer the episode (pl) or its stragglers (cpu), then report it."""
+        """Buffer the episode (pl, baremetal) or its stragglers (cpu), then report it."""
         nonlocal n_real_run, cur_transitions, frozen_for_eval, calls_ep, grad_ep, train_s_ep
         nonlocal episode_running
         episode_running = False
         frozen_for_eval = False
-        if not use_pl:
+        if not (use_pl or use_rpu):
             info = dict(info, n_weight_updates=updates_ep,
                         weights_grad_step_end=(last_update_grad if updates_ep
                                                else info.get("weights_grad_step", -1)))
         synced = bool(info.get("synced"))
         mode = "eval" if synced and info.get("is_eval") else "train"
-        if use_pl:
+        steps = (payload.get("step_timing") if isinstance(payload, dict) else None)
+        if steps is not None and len(steps.get("period_ms", ())):
+            comp = steps.get("compute_us")
+            for k in range(len(steps["period_ms"])):
+                step_timing_writer.writerow([
+                    args.inference, ep_i + 1, mode, int(steps["step"][k]),
+                    f"{steps['period_ms'][k]:.4f}",
+                    "" if not np.isfinite(steps["delay_ms"][k]) else f"{steps['delay_ms'][k]:.4f}",
+                    "" if comp is None else f"{comp[k]:.2f}"])
+            step_timing_f.flush()
+        if use_pl or use_rpu:
             ep = payload
             n_real_run += _add_to_buffer(model, _pl_episode_transitions(ep))
-            m = _pl_episode_metrics(ep, control_freq, args.balance_theta_rad,
-                                    args.balance_hold_s)
+            if use_rpu:
+                from Deploy.FPGA.FPGA_rpu_env import episode_balance_inputs
+                m = balance_metrics(*episode_balance_inputs(ep), control_freq,
+                                    args.balance_theta_rad, args.balance_hold_s)
+            else:
+                m = _pl_episode_metrics(ep, control_freq, args.balance_theta_rad,
+                                        args.balance_hold_s)
             dts = 1e3 * ep["dt_s"]
             timing = dict(mean_dt_ms=float(dts.mean()) if dts.size else float("nan"),
                           std_dt_ms=float(dts.std()) if dts.size else float("nan"),
                           max_dt_ms=float(dts.max()) if dts.size else float("nan"),
-                          n_gaps=int(ep["gap"].sum()), n_brake=int(ep["brake"].sum()))
+                          n_gaps=int(ep["gap"].sum()), n_brake=int(ep["brake"].sum()),
+                          **(ep.get("pl_timing") or {}))
             reset = dict(rest_wait_s=ep["rest_wait_s"], tared=ep["tared"])
             _report(ep_i, mode, ret=ep["return"], n_steps=ep["length"],
                     terminated=bool(ep["terminated"].any()), truncated=ep["truncated"],
@@ -1219,6 +1370,14 @@ def main(argv: list[str] | None = None) -> int:
     # ---- Learner loop ----
     rig_t0 = time.monotonic()
     rig.start()
+    if args.learner_cpu is not None:
+        # After rig.start(): threads inherit their creator's mask, and the rig
+        # thread should keep every core.
+        try:
+            os.sched_setaffinity(0, {args.learner_cpu})   # 0 = this (main) thread
+            print(f"Learner pinned to CPU {args.learner_cpu}")
+        except (AttributeError, OSError) as e:
+            print(f"  [warn] could not pin the learner to CPU {args.learner_cpu}: {e}")
     try:
         while True:
             # 1. Policy sync for the episode about to start.
@@ -1235,6 +1394,16 @@ def main(argv: list[str] | None = None) -> int:
                     meta["param_noise"] = noise
                     meta["pl_explore"] = args.pl_explore == "sac" and not is_eval
                     # non-zero 32-bit LFSR seed, reproducible per (seed, episode)
+                    meta["noise_seed"] = int(np.random.default_rng([args.seed, ep_next, 1])
+                                             .integers(1, 2**32))
+                    if latest is not None:
+                        meta["version"] = latest.put(ep_next, payload, n_grad_total)
+                    last_export_t = time.monotonic()
+                elif use_rpu:
+                    payload, _ = export_words(ep_next, is_eval)
+                    meta["explore"] = not (is_eval or args.deterministic)
+                    meta["dt_jitter"] = (args.eval_dt_jitter_frac if is_eval
+                                         else args.dt_jitter_frac)
                     meta["noise_seed"] = int(np.random.default_rng([args.seed, ep_next, 1])
                                              .integers(1, 2**32))
                     if latest is not None:
@@ -1313,6 +1482,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nFinal save:")
         _save_artifacts(model, real_buf, run_dir)
         timing_f.close()
+        step_timing_f.close()
         metrics_f.close()
         _write_eval_summary(eval_history, run_dir)
         (run_dir / "eval_candidate.zip").unlink(missing_ok=True)

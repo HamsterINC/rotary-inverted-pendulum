@@ -57,10 +57,19 @@ reinforcement_learning/
 │   └── FPGA/
 │       ├── FPGA_lowlevel_client.py  # PYNQ client mirroring the C low-level server
 │       ├── FPGA_env.py              # real-rig env for the FPGA target
+│       ├── FPGA_rpu_env.py          # FPGA_env with the control loop on the R5 (--inference baremetal)
+│       ├── rpu_client.py            # Linux side of the R5 shared-memory protocol
+│       ├── rpu_firmware/            # bare-metal Cortex-R5F policy (C, Vitis standalone);
+│       │                            #   rpu_shared.h is the shared-memory contract, see README.md;
+│       │                            #   rpu_boot.S/rpu_crt0.S fix a Vitis 2024.1 BSP bug (keep them);
+│       │                            #   once per boot: rpu_power_up.sh (board) + load_rpu.tcl (JTAG)
 │       └── *.xsa / *.xclbin         # bitstreams / hardware handoffs
-├── finetune_async.py          # threaded SAC fine-tuning on the real rig; --inference cpu|pl
-│                              #   (policy on the PS at a strict rate, or on the PL deployment bitstream)
+├── finetune_async.py          # threaded SAC fine-tuning on the real rig; --inference cpu|pl|baremetal
+│                              #   (policy on the PS at a strict rate, on the PL deployment bitstream,
+│                              #   or bare metal on the R5 while Linux only learns)
 ├── finetune_deploy.py         # thin wrapper = finetune_async.py --inference pl
+├── finetune_baremetal.py      # thin wrapper = finetune_async.py --inference baremetal
+├── compare_jitter.py          # loop-timing table/plots across runs (step_timing.csv per run)
 ├── finetune_metrics.py        # balance metrics + eval summary shared by the fine-tune runs
 ├── run_config.py              # writes/validates config.json per run (train ↔ finetune ↔ deploy)
 ├── sysid_wizard.py            # free-swing sysid: collect → fit → validate → sysid_params.json
@@ -110,7 +119,9 @@ the imports of the script you run and launch it from the matching directory.
   (action boxcar, transport delay, accel clip, ±125° rail brake, velocity cap,
   8 ms finite-difference velocity window, encoder/step quantisation). If you
   change `LowLevelServer.ino` or `RLControl.ino`, update the sim model to match
-  (and vice versa).
+  (and vice versa). The R5 firmware (`Deploy/FPGA/rpu_firmware/rpu_main.c`)
+  mirrors the cpu path (`FPGA_env._build_obs`, `apply_action`,
+  `FpgaLowLevelClient._apply_accel`); change them together.
 - **Sign convention**: `LowLevelServer` flips motor and pendulum signs on
   output; `real_env.py` un-flips on read so observations match the sim.
 - **Observation frame**: `[motor_pos, sin θ, cos θ, motor_vel, pen_vel, prev_action]`,
