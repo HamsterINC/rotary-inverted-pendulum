@@ -74,6 +74,7 @@ from Deploy.FPGA.FPGA_lowlevel_client import (
     enter_realtime,
     us_diff,
 )
+from Deploy.FPGA.loop_timing import summarize_loop_timing
 from Training.reward import RewardWeights, compute_reward
 from Simulation.pendulum_env import (
     CONTROL_FREQ_HZ,
@@ -414,28 +415,14 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
         if c is None or not c.measure_timing:
             return {}
         log = list(c.timing_log)
-        if not log:
-            return {"fpga_n_actions": 0}
-        per = np.array([m.period_s for m in log]) * 1e3
-        dly = np.array([m.delay_s for m in log if m.delay_cycles >= 0]) * 1e3
-        out = {
-            "fpga_n_actions": len(log),
-            "fpga_period_ms": float(per.mean()),
-            "fpga_period_std_ms": float(per.std()),
-            "fpga_jitter_pct": float(100.0 * per.std() / per.mean()),
-            "fpga_period_max_ms": float(per.max()),
-            "fpga_n_late_ticks": sum(1 for m in log if m.n_samples > self._samples_per_tick),
-            "fpga_n_no_new_sample": sum(1 for m in log if m.n_samples == 0),
-            "fpga_n_sync_misses": c.n_sync_misses,
-        }
-        if dly.size:
-            out.update(
-                fpga_delay_ms=float(dly.mean()),
-                fpga_delay_std_ms=float(dly.std()),
-                fpga_delay_p99_ms=float(np.percentile(dly, 99)),
-                fpga_delay_max_ms=float(dly.max()),
-            )
-        return out
+        return summarize_loop_timing(
+            period_ms=[m.period_s * 1e3 for m in log],
+            delay_ms=[m.delay_s * 1e3 for m in log],          # nan when unknown
+            n_samples=[m.n_samples for m in log],
+            samples_per_tick=self._samples_per_tick,
+            n_actions=len(log),
+            sync_misses=c.n_sync_misses,
+        )
 
     def loop_timing_steps(self) -> dict | None:
         """Per-action timing of this episode (same measurements as
@@ -449,6 +436,7 @@ class RealRotaryInvertedPendulumEnv(gym.Env):
             "period_ms": np.array([m.period_s for m in log]) * 1e3,
             "delay_ms": np.array([m.delay_s for m in log]) * 1e3,   # nan when unknown
             "compute_us": None,
+            "n_samples": np.array([m.n_samples for m in log]),
         }
 
     def prepare_control_thread(self) -> None:

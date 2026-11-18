@@ -1119,7 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
     step_timing_f = open(run_dir / "step_timing.csv", "w", newline="")
     step_timing_writer = csv.writer(step_timing_f)
     step_timing_writer.writerow(["inference", "episode", "mode", "step",
-                                 "period_ms", "delay_ms", "compute_us"])
+                                 "period_ms", "delay_ms", "compute_us", "n_samples"])
     metrics_f = open(run_dir / "metrics.csv", "w", newline="")
     metrics_writer = csv.writer(metrics_f)
     metrics_writer.writerow([
@@ -1299,12 +1299,14 @@ def main(argv: list[str] | None = None) -> int:
         steps = (payload.get("step_timing") if isinstance(payload, dict) else None)
         if steps is not None and len(steps.get("period_ms", ())):
             comp = steps.get("compute_us")
+            nsamp = steps.get("n_samples")
             for k in range(len(steps["period_ms"])):
                 step_timing_writer.writerow([
                     args.inference, ep_i + 1, mode, int(steps["step"][k]),
                     f"{steps['period_ms'][k]:.4f}",
                     "" if not np.isfinite(steps["delay_ms"][k]) else f"{steps['delay_ms'][k]:.4f}",
-                    "" if comp is None else f"{comp[k]:.2f}"])
+                    "" if comp is None else f"{comp[k]:.2f}",
+                    "" if nsamp is None else int(nsamp[k])])
             step_timing_f.flush()
         if use_pl or use_rpu:
             ep = payload

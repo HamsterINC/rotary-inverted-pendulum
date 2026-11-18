@@ -70,6 +70,7 @@ from Deploy.FPGA.deploy_client import (
     LogOverrun,
     StepRecord,
 )
+from Deploy.FPGA.loop_timing import summarize_loop_timing
 from Deploy.FPGA.rest_detect import (
     REST_ANGLE_RANGE_RAD,
     REST_DURATION_S,
@@ -96,64 +97,63 @@ FRAME_DIM = 6
 FIRST_STEP_TIMEOUT_S = 1.0     # engage -> first inference (SETTLE_TICKS + 1-2 ticks)
 
 
-def pl_loop_timing(records, control_hz: float) -> dict:
-    """Loop timing of one PL episode from the step-log cycle stamps, with the
-    same keys as FPGA_env.loop_timing_summary (plus the PL-only delay split):
+PL_SAMPLE_HZ = 500                      # top_pipeline SAMPLE_HZ
+PL_SAMPLE_CYC = PL_CLOCK_HZ / PL_SAMPLE_HZ
 
-    fpga_n_actions       actions measured
-    fpga_period_ms       mean action -> action period (consecutive steps only)
-    fpga_period_std_ms   its standard deviation
-    fpga_jitter_pct      period std / mean period * 100
-    fpga_period_max_ms   longest period
-    fpga_delay_ms        mean delay: sample in the observation -> action
-    fpga_delay_std_ms / fpga_delay_p99_ms / fpga_delay_max_ms
-    fpga_obs_age_ms      mean sample -> inference start
-    fpga_compute_ms      mean inference start -> action
-    fpga_n_late_ticks    periods longer than 1.5 control periods (missed tick)
+
+def _pl_pairs(records):
+    """Records with stamps, and the (prev, this) pairs of consecutive steps."""
+    recs = [r for r in records if r is not None and r.action_cyc is not None]
+    pairs = [(a, b) for a, b in zip(recs, recs[1:]) if b.episode_step == a.episode_step + 1]
+    return recs, pairs
+
+
+def _pl_n_samples(a, b) -> int:
+    """PL samples published between the observations of two consecutive steps
+    (the low-level client's n_samples)."""
+    return int(round(((b.sample_cyc - a.sample_cyc) & 0xFFFFFFFF) / PL_SAMPLE_CYC))
+
+
+def pl_loop_timing(records, control_hz: float) -> dict:
+    """Loop timing of one PL episode from the step-log cycle stamps: the same
+    keys and definitions as FPGA_env.loop_timing_summary (loop_timing.py),
+    with the PL's own numbers. Periods use consecutive steps only.
+    fpga_n_sync_misses is 0: the PL loop involves no PS-side wait. Extra:
+    fpga_obs_age_ms       mean sample -> inference start
+    fpga_compute_ms       mean inference start -> action
     Empty dict when the bitstream logs no stamps (8-word records).
     """
-    recs = [r for r in records if r is not None and r.action_cyc is not None]
+    recs, pairs = _pl_pairs(records)
     if not recs:
         return {}
     ms = 1e3 / PL_CLOCK_HZ
-    per = np.array([((b.action_cyc - a.action_cyc) & 0xFFFFFFFF) * ms
-                    for a, b in zip(recs, recs[1:])
-                    if b.episode_step == a.episode_step + 1])
-    dly = np.array([r.delay_cyc for r in recs]) * ms
-    out = {
-        "fpga_n_actions": len(recs),
-        "fpga_delay_ms": float(dly.mean()),
-        "fpga_delay_std_ms": float(dly.std()),
-        "fpga_delay_p99_ms": float(np.percentile(dly, 99)),
-        "fpga_delay_max_ms": float(dly.max()),
-        "fpga_obs_age_ms": float(np.mean([r.obs_age_cyc for r in recs]) * ms),
-        "fpga_compute_ms": float(np.mean([r.compute_cyc for r in recs]) * ms),
-    }
-    if per.size:
-        out.update(
-            fpga_period_ms=float(per.mean()),
-            fpga_period_std_ms=float(per.std()),
-            fpga_jitter_pct=float(100.0 * per.std() / per.mean()),
-            fpga_period_max_ms=float(per.max()),
-            fpga_n_late_ticks=int(np.sum(per > 1.5e3 / control_hz)),
-        )
+    out = summarize_loop_timing(
+        period_ms=[((b.action_cyc - a.action_cyc) & 0xFFFFFFFF) * ms for a, b in pairs],
+        delay_ms=[r.delay_cyc * ms for r in recs],
+        n_samples=[_pl_n_samples(a, b) for a, b in pairs],
+        samples_per_tick=max(1, round(PL_CLOCK_HZ / control_hz / PL_SAMPLE_CYC)),
+        n_actions=len(recs),
+        sync_misses=0,
+    )
+    out["fpga_obs_age_ms"] = float(np.mean([r.obs_age_cyc for r in recs]) * ms)
+    out["fpga_compute_ms"] = float(np.mean([r.compute_cyc for r in recs]) * ms)
     return out
 
 
 def pl_step_timing(records) -> dict | None:
     """Per-action timing arrays (step_timing.csv / compare_jitter.py), same
     measurements as pl_loop_timing; compute_us = PL inference start -> action."""
-    recs = [r for r in records if r is not None and r.action_cyc is not None]
-    if len(recs) < 2:
+    recs, pairs = _pl_pairs(records)
+    if not pairs:
         return None
     ms = 1e3 / PL_CLOCK_HZ
-    pairs = [(a, b) for a, b in zip(recs, recs[1:]) if b.episode_step == a.episode_step + 1]
     return {
         "step": np.array([b.episode_step for _, b in pairs]),
         "period_ms": np.array([((b.action_cyc - a.action_cyc) & 0xFFFFFFFF) * ms
                                for a, b in pairs]),
         "delay_ms": np.array([b.delay_cyc * ms for _, b in pairs]),
         "compute_us": np.array([b.compute_cyc * ms * 1e3 for _, b in pairs]),
+        "n_samples": np.array([_pl_n_samples(a, b) for a, b in pairs]),
     }
 
 

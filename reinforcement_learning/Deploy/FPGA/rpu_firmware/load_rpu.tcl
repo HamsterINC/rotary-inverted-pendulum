@@ -38,13 +38,23 @@ proc r5_state {} {
     if {[regexp {Cortex-R5 #0 \(([^)]*)\)} [targets] -> s]} { return $s }
     return "absent"
 }
+proc rpu_powered {} {
+    targets -set -nocase -filter {name =~ "*PSU*"}
+    expr {([mrd -value $::PMU_PWR_STATE] & $::PWR_RPU_TCM) == $::PWR_RPU_TCM}
+}
 
 connect
+# a freshly started hw_server lists the cores only after a moment
+set deadline [expr {[clock seconds] + 10}]
+while {[r5_state] eq "absent"} {
+    if {[clock seconds] > $deadline} { error "no Cortex-R5 #0 on the JTAG chain (board on, cable in?)" }
+    after 100
+}
 
-# 1. power: woken by the PMU firmware (rpu_power_up.sh on the board)
-set s [r5_state]
-if {[string match -nocase "*power*" $s] || [string match -nocase "*reset*" $s]} {
-    puts "R5 #0: $s. Run on the board now:  sudo sh rpu_power_up.sh  (waiting ${WAKE_TIMEOUT_S} s)"
+# 1. power: woken by the PMU firmware (rpu_power_up.sh on the board). Decided
+#    on PWR_STATE, not on the target's state text.
+if {![rpu_powered]} {
+    puts "R5 #0 has no power ([r5_state]). Run on the board now:  sudo sh rpu_power_up.sh  (waiting ${WAKE_TIMEOUT_S} s)"
     flush stdout
     set deadline [expr {[clock seconds] + $WAKE_TIMEOUT_S}]
     while {![string match -nocase "*running*" [set s [r5_state]]]} {

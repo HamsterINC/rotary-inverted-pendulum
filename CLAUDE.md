@@ -70,6 +70,7 @@ reinforcement_learning/
 ├── finetune_deploy.py         # thin wrapper = finetune_async.py --inference pl
 ├── finetune_baremetal.py      # thin wrapper = finetune_async.py --inference baremetal
 ├── compare_jitter.py          # loop-timing table/plots across runs (step_timing.csv per run)
+├── summarize_runs.py          # one table across runs: convergence, jitter/delay, learner calls, balance
 ├── finetune_metrics.py        # balance metrics + eval summary shared by the fine-tune runs
 ├── run_config.py              # writes/validates config.json per run (train ↔ finetune ↔ deploy)
 ├── sysid_wizard.py            # free-swing sysid: collect → fit → validate → sysid_params.json
