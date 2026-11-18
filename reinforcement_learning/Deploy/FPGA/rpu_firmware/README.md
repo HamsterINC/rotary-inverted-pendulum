@@ -160,6 +160,19 @@ Found on the AUP-ZU3 with the stock PYNQ image:
   external abort (DFSR `0x1008`) before `main`. `rpu_boot.S` and
   `rpu_crt0.S` load the word first. (`standalone_lockstep_mode_debug=true`
   in the BSP settings only removes the first of the three accesses.)
+- **PL clock crossing (affects cpu and baremetal timing).** The AXI GPIOs run
+  on `clk_pl_0`, the low-level core (`training_pipeline` in the Vivado
+  project's `lowlevelserver.sv`) on the board oscillator `sys_clk`, declared
+  asynchronous in `zu3.xdc`. `ctrl` entered unsynchronised, so ~8% of accel
+  strobes were lost or mis-latched (40 / 29 / 21 ms "periods", ticks without
+  a timing latch; the misses recur at the beat of the two clocks). Fixed in
+  the HDL: `ctrl` is two-flop synchronised and `accel_cmd` is taken only on
+  the synchronised strobe (cleared while disengaged). Needs a rebuilt
+  low-level bitstream. The latch read back (PL to PS) is not synchronised
+  either, so `rpu_main.c read_meas` and `FpgaLowLevelClient._hal_read_timing`
+  accept it only when two reads in a row agree. Until the new bitstream is in
+  use, compare runs on the std of the nominal ticks (|period - 20 ms| < 1 ms)
+  rather than the overall std.
 - **Mailbox in OCM.** The attach mailbox sits at `0xFFFCFF00` (OCM area used
   only by FSBL during boot; ARM Trusted Firmware is at `0xFFFEA000+`), mapped
   non-cacheable on the R5 by its own MPU region. It was in TCM first, but with
@@ -251,11 +264,18 @@ compare with `--mode eval` (deterministic, fixed weights) and `--mode train`.
 Verified on the AUP-ZU3 (stock PYNQ image, Vitis 2024.1): the firmware
 builds, is loaded by `load_rpu.tcl`, runs in lock-step on R5 #0 and publishes
 the mailbox magic and heartbeat in OCM; after the PMU wake the R5 reaches
-DDR, OCM and the LPD registers.
+DDR, OCM and the LPD registers. `RpuClient` on the board (with the low-level
+overlay loaded) attaches a `pynq.allocate` window (got `0x78500000`), reads
+the control block the R5 initialised there, and detaches cleanly. The
+low-level bitstream's GPIOs sit at `0x80000000`-`0x80040000` (HPM0_LPD).
 
-Not yet verified: the host attaching a `pynq.allocate` window (window below
-2 GiB, R5 initialises its control block there), the R5 driving the
-low-level bitstream's AXI GPIOs during an episode, and whether the forward
+Run the host under `sudo` with PYNQ's environment, e.g.
+`sudo bash -c 'source /etc/profile.d/xrt_setup.sh; source /etc/profile.d/pynq_venv.sh; <venv>/bin/python finetune_async.py ...'`
+(plain `sudo python` finds no XRT device, and `pynq.allocate` needs an
+overlay loaded first, which the env does).
+
+Not yet verified: the R5 driving the low-level bitstream's AXI GPIOs during
+an episode, and whether the forward
 pass fits in the period (`rpu_compute_us` in timing.csv; about 1–3 ms
 expected for 256×256, because the ~0.3 MB of weights stream from DDR on every
 tick).

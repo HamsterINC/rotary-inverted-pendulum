@@ -61,7 +61,12 @@
 #define MEAS_CNT_MASK    0x00FFFFFFu
 #define NO_SAMPLE_US     100000      /* no new PL sample for this long -> ERR_NO_SAMPLE */
 #define TORN_RETRIES     4
-#define MEAS_RETRIES     8
+/* Accel strobe high time. Back-to-back GPIO writes from the R5 give a pulse of
+ * a few tens of ns, which the PL sometimes missed or registered late (40 ms /
+ * 29 ms periods, ~9% of ticks without a timing latch on the first board run).
+ * The cpu path's Python MMIO writes are microseconds apart; match that. */
+#define STROBE_HOLD_US   5
+#define MEAS_WAIT_US     200         /* wait this long for the PL timing latch */
 
 /* ---- empty remoteproc resource table (older zynqmp_r5 drivers want one) ---- */
 struct rsc_table {
@@ -279,8 +284,12 @@ static void write_accel_q(int32_t q, int strobe)
 {
     Xil_Out32(cfg.gpio_ctrl + GPIO_CH2, (uint32_t)q & 0xFFFFu);
     if (strobe) {
-        dsb();                               /* data before the strobe */
+        (void)Xil_In32(cfg.gpio_ctrl + GPIO_CH2);  /* data write has reached the GPIO */
         Xil_Out32(cfg.gpio_ctrl + GPIO_CH1, cfg.ctrl_level | cfg.ctrl_stb);
+        (void)Xil_In32(cfg.gpio_ctrl + GPIO_CH1);  /* strobe is out: start the hold time */
+        const uint32_t t0 = cycles();
+        while (cycles() - t0 < (uint32_t)STROBE_HOLD_US * (CPU_HZ / 1000000u))
+            ;
         Xil_Out32(cfg.gpio_ctrl + GPIO_CH1, cfg.ctrl_level);
     }
     dsb();
@@ -321,17 +330,33 @@ static int read_meas(uint32_t *period, uint32_t *action)
 {
     if (!cfg.gpio_meas)
         return 0;
-    for (int i = 0; i < MEAS_RETRIES; ++i) {
+    const uint32_t t0 = cycles();
+    const uint32_t wait_cyc = (uint32_t)MEAS_WAIT_US * (CPU_HZ / 1000000u);
+    int retried = 0;
+    for (;;) {
+        /* meas_period / meas_action live in the PL's sys_clk domain and reach
+         * the GPIO unsynchronised: a read during the latch update can mix old
+         * and new bits. Accept a value only when two reads in a row agree. */
         *period = Xil_In32(cfg.gpio_meas + GPIO_CH1);
         *action = Xil_In32(cfg.gpio_meas + GPIO_CH2);
+        if (Xil_In32(cfg.gpio_meas + GPIO_CH1) != *period
+            || Xil_In32(cfg.gpio_meas + GPIO_CH2) != *action) {
+            if (cycles() - t0 > wait_cyc)
+                return 0;
+            continue;
+        }
         uint32_t seq = (*period >> 24) & 0xFFu;
         if (seq != last_meas_seq) {
             last_meas_seq = seq;
             return 1;
         }
-        CTRL[C_N_MEAS_RETRY] = CTRL[C_N_MEAS_RETRY] + 1u;
+        if (!retried) {
+            CTRL[C_N_MEAS_RETRY] = CTRL[C_N_MEAS_RETRY] + 1u;   /* ticks that had to wait */
+            retried = 1;
+        }
+        if (cycles() - t0 > wait_cyc)
+            return 0;
     }
-    return 0;
 }
 
 /* ---- supervision ---------------------------------------------------------- */
@@ -604,11 +629,18 @@ static void run_episode(void)
         Xil_Out32(cfg.gpio_ctrl + GPIO_CH1, 0u);  /* nobody supervises: disengage */
         dsb();
         finish(ST_ERROR, ERR_HOST_LOST);
-    } else if (stopped) {
-        /* Host abort: it disengages itself, so never pulse the ctrl register
-         * (that would rewrite the engage level). */
+    } else if (stopped && abort_reason < 0) {
+        /* Host abort: it disengages itself (which zeroes the PL's accel), so
+         * never pulse the ctrl register (that would rewrite the engage level
+         * if the host has already disengaged). */
         write_accel_q(0, 0);
-        finish(abort_reason > 0 ? ST_ERROR : ST_DONE, abort_reason > 0 ? abort_reason : ERR_NONE);
+        finish(ST_DONE, ERR_NONE);
+    } else if (stopped) {
+        /* R5-side error (e.g. ERR_NO_SAMPLE): the host still has the motor
+         * engaged and has not touched ctrl, so strobe accel 0 now. The PL only
+         * takes accel_cmd on a strobe (clock-domain fix in lowlevelserver.sv). */
+        write_accel_q(0, 1);
+        finish(ST_ERROR, abort_reason);
     } else {
         write_accel_q(0, 1);                 /* accel 0 until Linux homes the motor */
         finish(ST_DONE, ERR_NONE);

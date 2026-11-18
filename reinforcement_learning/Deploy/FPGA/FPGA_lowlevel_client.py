@@ -292,8 +292,16 @@ class FpgaLowLevelClient:
         )
 
     def _hal_read_timing(self, used_sample_cyc: int | None = None) -> LoopTiming:
-        period = self.gpio_meas.read(GPIO_CH1_DATA_OFFSET) & 0xFFFFFFFF
-        action = self.gpio_meas.read(GPIO_CH2_DATA_OFFSET) & 0xFFFFFFFF
+        # The latch lives in the PL's sys_clk domain and reaches the GPIO
+        # unsynchronised (GPIOs run on clk_pl_0): a read during the update can
+        # mix old and new bits. Take it once two reads in a row agree (same
+        # rule as rpu_firmware/rpu_main.c read_meas).
+        for _ in range(4):
+            period = self.gpio_meas.read(GPIO_CH1_DATA_OFFSET) & 0xFFFFFFFF
+            action = self.gpio_meas.read(GPIO_CH2_DATA_OFFSET) & 0xFFFFFFFF
+            if (self.gpio_meas.read(GPIO_CH1_DATA_OFFSET) & 0xFFFFFFFF) == period and \
+               (self.gpio_meas.read(GPIO_CH2_DATA_OFFSET) & 0xFFFFFFFF) == action:
+                break
         action_cyc = action & MEAS_CNT_MAX
         delay = (-1 if used_sample_cyc is None
                  else (action_cyc - used_sample_cyc) & MEAS_CNT_MAX)
