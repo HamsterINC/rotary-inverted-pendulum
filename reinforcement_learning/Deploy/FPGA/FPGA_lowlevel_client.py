@@ -166,7 +166,7 @@ class FpgaLowLevelClient:
 
     def __init__(
         self,
-        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/reinforcement_learning/Deploy/FPGA/lowlevel_client_4x.xsa",
+        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/reinforcement_learning/Deploy/FPGA/low_level_client_timing.xsa",
         download: bool = True,
         pos_frac_bits: int = 12,     # Q3.12 rad
         vel_frac_bits: int = 7,      # Q9.7  rad/s

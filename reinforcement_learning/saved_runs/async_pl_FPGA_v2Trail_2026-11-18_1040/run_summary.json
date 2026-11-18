@@ -1,0 +1,9 @@
+{
+  "inference": "pl",
+  "weight_sync": "continuous",
+  "episodes": 50,
+  "real_transitions": 19997,
+  "grad_steps_total": 2628,
+  "grad_per_transition": 0.13141971295694355,
+  "rig_minutes": 9.492015951416663
+}
