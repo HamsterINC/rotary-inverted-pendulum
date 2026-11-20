@@ -132,6 +132,8 @@ def summarize(run: Path, args) -> dict:
     conv_ep, conv_min = convergence(metrics, args.converge_mode, args.streak)
     if args.balance_mode == "last":
         bal = metrics[-args.last_n:]          # final episodes, eval and train alike
+    elif args.balance_mode == "first":
+        bal = metrics[:args.first_n]          # opening episodes, eval and train alike
     else:
         bal = [m for m in metrics if args.balance_mode == "all" or m.get("mode") == args.balance_mode]
     balanced = np.array([_num(m.get("balanced")) == 1 and _num(m.get("dropped") or 0) == 0
@@ -226,6 +228,8 @@ def print_latex(rows: list[dict], args) -> None:
         heads = [r["run"].replace("_", r"\_") for r in rows]
     if args.balance_mode == "last":
         bal = f"last {args.last_n} episodes"
+    elif args.balance_mode == "first":
+        bal = f"first {args.first_n} episodes"
     else:
         bal = f"{args.balance_mode} episodes"
     conv = f"{args.converge_mode} episode" + (f", {args.streak} in a row" if args.streak > 1 else "")
@@ -263,9 +267,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="episodes that count for convergence (default eval: deterministic policy)")
     p.add_argument("--streak", type=int, default=1,
                    help="consecutive held episodes required for convergence")
-    p.add_argument("--balance-mode", choices=("eval", "train", "all", "last"), default="eval",
+    p.add_argument("--balance-mode", choices=("eval", "train", "all", "first", "last"),
+                   default="eval",
                    help="episodes averaged for balanced / upright / time to balance "
-                        "(last: the final --last-n episodes, eval and train)")
+                        "(first / last: the opening --first-n / final --last-n episodes, "
+                        "eval and train)")
+    p.add_argument("--first-n", type=int, default=10,
+                   help="episodes for --balance-mode first (default 10)")
     p.add_argument("--last-n", type=int, default=10,
                    help="episodes for --balance-mode last (default 10)")
     p.add_argument("--markdown", action="store_true", help="print a Markdown table")
@@ -279,8 +287,8 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: no run folders (with metrics.csv) found", file=sys.stderr)
         return 2
     rows = [summarize(r, args) for r in runs]
-    which = (f"the last {args.last_n}" if args.balance_mode == "last"
-             else args.balance_mode)
+    which = {"last": f"the last {args.last_n}",
+             "first": f"the first {args.first_n}"}.get(args.balance_mode, args.balance_mode)
     if args.latex:
         print_latex(rows, args)
     else:

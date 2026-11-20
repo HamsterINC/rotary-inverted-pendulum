@@ -2,6 +2,7 @@
 
     python compare_jitter.py runs/async_cpu_X runs/async_pl_X runs/async_baremetal_X
     python compare_jitter.py runs/async_* --mode eval --plot jitter.png
+    python compare_jitter.py runs/async_X --mode eval --learner split   # busy vs idle
 
 Every run's step_timing.csv (written by finetune_async.py) holds one row per
 action with the PL-measured numbers, so the three inference paths are timed by
@@ -30,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 
-def load_run(run: Path, mode: str, skip_episodes: int) -> dict:
+def load_run(run: Path, mode: str, skip_episodes: int, learner: str = "all") -> dict:
     path = run / "step_timing.csv"
     if not path.exists():
         raise SystemExit(f"ERROR: {path} not found (run predates step_timing.csv?)")
@@ -39,6 +40,9 @@ def load_run(run: Path, mode: str, skip_episodes: int) -> dict:
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
             if mode != "all" and row["mode"] != mode:
+                continue
+            # Older runs have no 'learner' column: they only match "all".
+            if learner != "all" and row.get("learner") != learner:
                 continue
             ep = int(row["episode"])
             if ep <= skip_episodes:
@@ -55,6 +59,8 @@ def load_run(run: Path, mode: str, skip_episodes: int) -> dict:
     cfg = run / "config.json"
     if cfg.exists():
         control_hz = json.loads(cfg.read_text()).get("control_freq_hz")
+    if learner != "all":
+        inference = f"{inference or '?'} [{learner}]"
     return {"run": run.name, "inference": inference or "?", "control_hz": control_hz,
             "period": np.array(period), "delay": np.array(delay),
             "compute": np.array(compute), "n_episodes": len(episodes)}
@@ -140,6 +146,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("runs", type=Path, nargs="+", help="fine-tune run folders")
     p.add_argument("--mode", choices=("all", "train", "eval"), default="all",
                    help="episodes to include (eval = deterministic, fixed weights)")
+    p.add_argument("--learner", choices=("all", "busy", "idle", "split"), default="all",
+                   help="filter on whether the learner trained during the episode "
+                        "(finetune_async.py --eval-learner). split = one busy and one "
+                        "idle row per run, the training-independence test.")
     p.add_argument("--skip-episodes", type=int, default=0,
                    help="drop the first N episodes of every run (warm-up)")
     p.add_argument("--control-freq", type=float, default=None,
@@ -149,7 +159,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="write the table as .csv or .json")
     args = p.parse_args(argv)
 
-    runs = [load_run(r, args.mode, args.skip_episodes) for r in args.runs]
+    learners = ("busy", "idle") if args.learner == "split" else (args.learner,)
+    runs = [load_run(r, args.mode, args.skip_episodes, lr)
+            for r in args.runs for lr in learners]
     hz = args.control_freq or next((d["control_hz"] for d in runs if d["control_hz"]), None)
     if hz is None:
         print("ERROR: no control_freq_hz in config.json; pass --control-freq", file=sys.stderr)

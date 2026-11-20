@@ -118,7 +118,10 @@ Fine-tuning metrics (finetune_metrics.py):
     Every --eval-every'th episode (the 1st, then every Nth after it) runs the
     policy DETERMINISTICALLY with fixed weights — the way it will be deployed
     (cpu: deterministic actions, --eval-dt-jitter-frac; pl: exploration off,
-    no parameter noise). Its transitions still go into the replay buffer. The first eval
+    no parameter noise). Its transitions are not added to the replay buffer
+    (deterministic, off the exploration distribution) unless --keep-eval-samples.
+    --eval-learner idle|alternate stops gradient steps during (every other)
+    eval, to test that loop timing is independent of the training load. The first eval
     runs before any real-data gradient step, giving the sim-only baseline.
 
     Per episode: balanced, time_to_balance_s, frac_upright,
@@ -790,7 +793,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--eval-every", type=int, default=5,
                    help="run a deterministic eval episode as the 1st episode "
                         "and then every N episodes (1, N+1, 2N+1, ...). Its "
-                        "transitions still go into the buffer. 0 disables.")
+                        "transitions are NOT added to the replay buffer unless "
+                        "--keep-eval-samples. 0 disables.")
+    p.add_argument("--keep-eval-samples", action="store_true",
+                   help="also add the deterministic eval episodes' transitions to the "
+                        "replay buffer (old behaviour). Default: evals only measure.")
+    p.add_argument("--eval-learner", choices=("train", "idle", "alternate"), default="train",
+                   help="what the learner does during an eval episode. train (default): "
+                        "keeps taking gradient steps (weights stay frozen for the rig). "
+                        "idle: no gradient steps for the whole eval episode. alternate: "
+                        "every other eval is idle, so one run gives paired busy/idle "
+                        "deterministic episodes to test that loop timing does not "
+                        "depend on the training workload (step_timing.csv 'learner' "
+                        "column; compare_jitter.py --mode eval --learner split).")
     p.add_argument("--balance-theta-rad", type=float, default=0.2,
                    help="|θ| from upright below which the pendulum counts as "
                         "upright for the balance metrics (0.2 rad ≈ 11°)")
@@ -951,6 +966,8 @@ def main(argv: list[str] | None = None) -> int:
                                             if use_pl or use_rpu else None),
                    "rpu_firmware": args.rpu_firmware if use_rpu else None,
                    "learner_cpu": args.learner_cpu,
+                   "eval_learner": args.eval_learner,
+                   "keep_eval_samples": bool(args.keep_eval_samples),
                    "rest_check_s": args.rest_check_s,
                    "pl_explore": args.pl_explore if use_pl else None,
                    "param_noise": args.param_noise if use_pl else None,
@@ -1119,7 +1136,8 @@ def main(argv: list[str] | None = None) -> int:
     step_timing_f = open(run_dir / "step_timing.csv", "w", newline="")
     step_timing_writer = csv.writer(step_timing_f)
     step_timing_writer.writerow(["inference", "episode", "mode", "step",
-                                 "period_ms", "delay_ms", "compute_us", "n_samples"])
+                                 "period_ms", "delay_ms", "compute_us", "n_samples",
+                                 "learner"])
     metrics_f = open(run_dir / "metrics.csv", "w", newline="")
     metrics_writer = csv.writer(metrics_f)
     metrics_writer.writerow([
@@ -1140,6 +1158,9 @@ def main(argv: list[str] | None = None) -> int:
     calls_ep, grad_ep, train_s_ep = 0, 0, 0.0
     cur_transitions: list = []  # cpu: transitions of the running episode
     frozen_for_eval = False     # continuous sync: no updates during an eval
+    learner_idle = False        # --eval-learner idle/alternate: no train() this episode
+    drop_samples = False        # eval episode without --keep-eval-samples: don't buffer
+    calls_running = 0           # train() calls while the current episode runs
     episode_running = False     # between the start-of-episode sync and its report
     running_ep = -1
     updates_ep = 0              # cpu: mid-episode snapshot refreshes
@@ -1287,9 +1308,16 @@ def main(argv: list[str] | None = None) -> int:
     def _finish_episode(ep_i: int, payload, info: dict) -> None:
         """Buffer the episode (pl, baremetal) or its stragglers (cpu), then report it."""
         nonlocal n_real_run, cur_transitions, frozen_for_eval, calls_ep, grad_ep, train_s_ep
-        nonlocal episode_running
+        nonlocal episode_running, learner_idle, calls_running, drop_samples
+        drop = drop_samples
         episode_running = False
         frozen_for_eval = False
+        learner_idle = False
+        drop_samples = False
+        # Measured, not configured: "idle" only if no train() call overlapped
+        # the episode (also true for evals before learning_starts).
+        learner_tag = "idle" if calls_running == 0 else "busy"
+        calls_running = 0
         if not (use_pl or use_rpu):
             info = dict(info, n_weight_updates=updates_ep,
                         weights_grad_step_end=(last_update_grad if updates_ep
@@ -1306,11 +1334,13 @@ def main(argv: list[str] | None = None) -> int:
                     f"{steps['period_ms'][k]:.4f}",
                     "" if not np.isfinite(steps["delay_ms"][k]) else f"{steps['delay_ms'][k]:.4f}",
                     "" if comp is None else f"{comp[k]:.2f}",
-                    "" if nsamp is None else int(nsamp[k])])
+                    "" if nsamp is None else int(nsamp[k]),
+                    learner_tag])
             step_timing_f.flush()
         if use_pl or use_rpu:
             ep = payload
-            n_real_run += _add_to_buffer(model, _pl_episode_transitions(ep))
+            if not drop:
+                n_real_run += _add_to_buffer(model, _pl_episode_transitions(ep))
             if use_rpu:
                 from Deploy.FPGA.FPGA_rpu_env import episode_balance_inputs
                 m = balance_metrics(*episode_balance_inputs(ep), control_freq,
@@ -1330,8 +1360,9 @@ def main(argv: list[str] | None = None) -> int:
                     m=m, timing=timing, info=info, reset=reset)
         else:
             stragglers = tq.drain()
-            n_real_run += _add_to_buffer(model, stragglers)
-            cur_transitions.extend(stragglers)
+            if not drop:
+                n_real_run += _add_to_buffer(model, stragglers)
+            cur_transitions.extend(stragglers)          # metrics use them either way
             transitions, cur_transitions = cur_transitions, []
             stats = payload["stats"]
             if weight_sync == "continuous":
@@ -1415,6 +1446,12 @@ def main(argv: list[str] | None = None) -> int:
                     snapshot.refresh_from(model.actor)
                     payload = True
                 frozen_for_eval = is_eval
+                drop_samples = is_eval and not args.keep_eval_samples
+                learner_idle = is_eval and (
+                    args.eval_learner == "idle"
+                    or (args.eval_learner == "alternate"
+                        and (ep_next // args.eval_every) % 2 == 1))
+                calls_running = 0
                 episode_running, running_ep = True, ep_next
                 updates_ep, last_update_grad = 0, -1
                 sync.provide(payload, meta)
@@ -1423,7 +1460,8 @@ def main(argv: list[str] | None = None) -> int:
             if tq is not None:
                 drained = tq.drain()
                 if drained:
-                    n_real_run += _add_to_buffer(model, drained)
+                    if not drop_samples:
+                        n_real_run += _add_to_buffer(model, drained)
                     cur_transitions.extend(drained)
 
             # 3. Finished episodes.
@@ -1448,6 +1486,8 @@ def main(argv: list[str] | None = None) -> int:
                          and mixed.size() >= model.batch_size)
             if can_train and args.max_grad_per_transition > 0:
                 can_train = n_grad_total < args.max_grad_per_transition * n_real_run
+            if learner_idle:
+                can_train = False
             if can_train:
                 t0 = time.monotonic()
                 model.train(gradient_steps=args.gradient_steps,
@@ -1456,6 +1496,8 @@ def main(argv: list[str] | None = None) -> int:
                 n_grad_total += args.gradient_steps
                 grad_ep += args.gradient_steps
                 calls_ep += 1
+                if episode_running:
+                    calls_running += 1
                 if weight_sync == "continuous" and not frozen_for_eval:
                     if snapshot is not None:
                         snapshot.refresh_from(model.actor)
@@ -1476,7 +1518,9 @@ def main(argv: list[str] | None = None) -> int:
         if rig.is_alive():
             print("  [warn] rig thread did not exit within 10 s", file=sys.stderr)
         if tq is not None:                       # transitions of an interrupted episode
-            n_real_run += _add_to_buffer(model, tq.drain())
+            leftover = tq.drain()
+            if not drop_samples:
+                n_real_run += _add_to_buffer(model, leftover)
         try:
             env.close()
         except Exception:
