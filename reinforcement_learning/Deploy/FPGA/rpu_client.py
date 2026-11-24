@@ -269,8 +269,10 @@ class RpuClient:
         while self.m(S.MB_MAGIC) != S.MBOX_MAGIC:
             if time.monotonic() - t0 > timeout_s:
                 raise RpuError(f"no R5 firmware (mailbox magic 0x{self.m(S.MB_MAGIC):08x} at "
-                               f"0x{S.MBOX_ADDR:08x}); load rpu_policy.elf on "
-                               "psu_cortexr5_0 first (XSCT, see rpu_firmware/README.md)")
+                               f"0x{S.MBOX_ADDR:08x}). After every board boot: start "
+                               "load_rpu.tcl on the PC (JTAG), then run "
+                               "'sudo sh Deploy/FPGA/rpu_firmware/rpu_power_up.sh' here "
+                               "(see rpu_firmware/README.md)")
             time.sleep(0.01)
         hb = self.m(S.MB_HEARTBEAT)
         time.sleep(0.005)
