@@ -713,6 +713,12 @@ def main(argv: list[str] | None = None) -> int:
                         "thread keeps all cores. Use the same value for all three "
                         "--inference modes so the jitter comparison is fair")
     # --- episodes / reset ---
+    p.add_argument("--no-learn", action="store_true",
+                   help="run the policy only: every episode is a deterministic eval "
+                        "with the loaded weights, no replay buffers are loaded, no "
+                        "gradient steps are taken and no checkpoints are written "
+                        "(metrics/timing CSVs and eval_summary.json still are). "
+                        "run_policy.py is this flag as a wrapper.")
     p.add_argument("--episodes", type=int, default=50,
                    help="number of real-device episodes to collect")
     p.add_argument("--episode-length-s", type=float, default=8.0)
@@ -822,6 +828,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     use_pl = args.inference == "pl"
     use_rpu = args.inference == "baremetal"
+    if args.no_learn:
+        # Every episode = deterministic eval with fixed weights, nothing
+        # buffered, learner idle the whole time.
+        args.no_buffer = True
+        args.eval_every = 1
+        args.keep_eval_samples = False
+        args.eval_learner = "idle"
+        args.weight_sync = "episode"
     weight_sync = args.weight_sync
     if not use_pl and (args.param_noise > 0 or args.pl_explore is not None):
         print(f"ERROR: --param-noise / --pl-explore are for --inference pl; "
@@ -863,7 +877,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- Output run folder ----
     run_name = (args.run_name or
-                f"async_{args.inference}_{source.name}_{time.strftime('%Y-%m-%d_%H%M')}")
+                f"{'run' if args.no_learn else 'async'}_{args.inference}_{source.name}_"
+                f"{time.strftime('%Y-%m-%d_%H%M')}")
     run_dir = (RUNS_ROOT / run_name).resolve()
     if run_dir == source:
         print("ERROR: output run folder is the source run folder; pick a "
@@ -961,6 +976,7 @@ def main(argv: list[str] | None = None) -> int:
                    "sim_buffer": sim_buffer_path.name if sim_buffer_path else None,
                    "real_buffer": real_buffer_path.name if real_buffer_path else None,
                    "inference": args.inference,
+                   "no_learn": bool(args.no_learn),
                    "weight_sync": weight_sync,
                    "pl_upload_interval_s": (args.pl_upload_interval_s
                                             if use_pl or use_rpu else None),
@@ -1302,7 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
         lg.record("time/n_weight_updates", info.get("n_weight_updates", 0))
         lg.dump(step=model.num_timesteps)
 
-        if (ep_i + 1) % args.checkpoint_freq == 0:
+        if not args.no_learn and (ep_i + 1) % args.checkpoint_freq == 0:
             _save_artifacts(model, real_buf, run_dir, suffix=f"ep{ep_i + 1:03d}")
 
     def _finish_episode(ep_i: int, payload, info: dict) -> None:
@@ -1387,15 +1403,21 @@ def main(argv: list[str] | None = None) -> int:
                         m=m, timing=timing, info=info, reset=reset)
         calls_ep, grad_ep, train_s_ep = 0, 0, 0.0
 
-    print(f"\nStarting fine-tune ({args.inference} inference): {args.episodes} episodes × "
-          f"{args.episode_length_s} s @ {control_freq:g} Hz, "
-          f"K={args.gradient_steps}, lr={args.learning_rate}, sync={weight_sync}"
-          + ((f", PL exploration {args.pl_explore}"
-              + (f" (param noise {args.param_noise:g})" if args.pl_explore == "param" else ""))
-             if use_pl else ""))
-    print(f"Real transitions so far: {real_buf.size()}, "
-          f"learning_starts={args.learning_starts}")
-    if args.eval_every > 0:
+    if args.no_learn:
+        print(f"\nRunning policy ({args.inference} inference, no learning): "
+              f"{args.episodes} deterministic episodes × {args.episode_length_s} s "
+              f"@ {control_freq:g} Hz; balance = |θ| < {args.balance_theta_rad:g} rad "
+              f"for {args.balance_hold_s:g} s")
+    else:
+        print(f"\nStarting fine-tune ({args.inference} inference): {args.episodes} episodes × "
+              f"{args.episode_length_s} s @ {control_freq:g} Hz, "
+              f"K={args.gradient_steps}, lr={args.learning_rate}, sync={weight_sync}"
+              + ((f", PL exploration {args.pl_explore}"
+                  + (f" (param noise {args.param_noise:g})" if args.pl_explore == "param" else ""))
+                 if use_pl else ""))
+        print(f"Real transitions so far: {real_buf.size()}, "
+              f"learning_starts={args.learning_starts}")
+    if args.eval_every > 0 and not args.no_learn:
         print(f"Deterministic eval every {args.eval_every} episodes "
               f"(first = sim-only baseline); balance = |θ| < "
               f"{args.balance_theta_rad:g} rad for {args.balance_hold_s:g} s")
@@ -1417,7 +1439,7 @@ def main(argv: list[str] | None = None) -> int:
             if sync.pending():
                 ep_next = sync.requested_episode
                 is_eval = args.eval_every > 0 and ep_next % args.eval_every == 0
-                if is_eval:
+                if is_eval and not args.no_learn:
                     # Exactly the weights this eval scores (training moves on);
                     # promoted to best_eval.zip if it wins.
                     model.save(run_dir / "eval_candidate.zip")
@@ -1486,7 +1508,7 @@ def main(argv: list[str] | None = None) -> int:
                          and mixed.size() >= model.batch_size)
             if can_train and args.max_grad_per_transition > 0:
                 can_train = n_grad_total < args.max_grad_per_transition * n_real_run
-            if learner_idle:
+            if learner_idle or args.no_learn:
                 can_train = False
             if can_train:
                 t0 = time.monotonic()
@@ -1525,8 +1547,9 @@ def main(argv: list[str] | None = None) -> int:
             env.close()
         except Exception:
             pass
-        print("\nFinal save:")
-        _save_artifacts(model, real_buf, run_dir)
+        if not args.no_learn:
+            print("\nFinal save:")
+            _save_artifacts(model, real_buf, run_dir)
         timing_f.close()
         step_timing_f.close()
         metrics_f.close()
