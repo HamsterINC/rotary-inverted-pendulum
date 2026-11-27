@@ -1,0 +1,61 @@
+{
+  "format_version": 1,
+  "n_transitions": 9587,
+  "source_buffer_size": 200000,
+  "n_envs": 1,
+  "obs_shape": [
+    6
+  ],
+  "action_shape": [
+    1
+  ],
+  "buffer_class": "ReplayBuffer",
+  "numpy_version": "1.26.4",
+  "fields": {
+    "observations": {
+      "dtype": "<f4",
+      "shape": [
+        9587,
+        1,
+        6
+      ]
+    },
+    "next_observations": {
+      "dtype": "<f4",
+      "shape": [
+        9587,
+        1,
+        6
+      ]
+    },
+    "actions": {
+      "dtype": "<f4",
+      "shape": [
+        9587,
+        1,
+        1
+      ]
+    },
+    "rewards": {
+      "dtype": "<f4",
+      "shape": [
+        9587,
+        1
+      ]
+    },
+    "dones": {
+      "dtype": "<f4",
+      "shape": [
+        9587,
+        1
+      ]
+    },
+    "timeouts": {
+      "dtype": "<f4",
+      "shape": [
+        9587,
+        1
+      ]
+    }
+  }
+}

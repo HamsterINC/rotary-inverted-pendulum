@@ -1,0 +1,9 @@
+{
+  "inference": "baremetal",
+  "weight_sync": "continuous",
+  "episodes": 50,
+  "real_transitions": 16000,
+  "grad_steps_total": 2420,
+  "grad_per_transition": 0.15125,
+  "rig_minutes": 9.723599419566654
+}
