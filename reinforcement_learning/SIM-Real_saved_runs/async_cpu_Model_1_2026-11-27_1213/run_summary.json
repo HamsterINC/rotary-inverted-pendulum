@@ -1,0 +1,9 @@
+{
+  "inference": "cpu",
+  "weight_sync": "continuous",
+  "episodes": 30,
+  "real_transitions": 9600,
+  "grad_steps_total": 1292,
+  "grad_per_transition": 0.13458333333333333,
+  "rig_minutes": 5.456950439916667
+}
