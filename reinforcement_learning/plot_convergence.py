@@ -15,6 +15,9 @@ Metrics:
     frac_upright  fraction of the episode with |θ| below the balance threshold
                   ("time upright", 0-1; default)
     return        episode return (same reward as in sim, Training/reward.py)
+    mean_abs_action_balanced
+                  mean |action| while balanced (control effort; episodes that
+                  never balanced have no value and leave a gap)
 
 Several runs of one platform (seeds): the line is the mean over the runs that
 reached that episode, the band / error bars span min to max. Runs with fewer
@@ -44,7 +47,8 @@ STYLE = {
 }
 TEXT, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 METRICS = {"frac_upright": ("Time upright [fraction]", (0.0, 1.0)),
-           "return": ("Episode return", None)}
+           "return": ("Episode return", None),
+           "mean_abs_action_balanced": ("Mean |a| while balanced", (0.0, 1.0))}
 
 
 def find_runs(paths: list[Path]) -> list[Path]:
@@ -200,7 +204,10 @@ def main(argv: list[str] | None = None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("runs", type=Path, nargs="+",
                    help="fine-tune run folders, or folders containing them")
-    p.add_argument("--metric", choices=("frac_upright", "return", "both"), default="frac_upright")
+    p.add_argument("--metric", choices=("frac_upright", "return", "mean_abs_action_balanced",
+                                        "both"), default="frac_upright",
+                   help="mean_abs_action_balanced = mean |action| over the balanced part "
+                        "(control effort / chatter; NaN when the episode never balanced)")
     p.add_argument("--smooth", type=int, default=5,
                    help="rolling mean over N training episodes (1 = raw, default 5)")
     p.add_argument("--max-episode", type=int, default=None,
