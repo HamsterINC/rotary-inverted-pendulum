@@ -1,6 +1,6 @@
 {
   "action_smooth_window": 1,
-  "control_freq_hz": 100.0,
+  "control_freq_hz": 200.0,
   "firmware_obs_model": true,
   "max_accel_rad_s2": 150.0,
   "max_velocity_rad_s": 5.0,
