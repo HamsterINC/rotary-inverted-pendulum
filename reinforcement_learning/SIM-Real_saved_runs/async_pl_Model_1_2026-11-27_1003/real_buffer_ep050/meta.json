@@ -1,0 +1,69 @@
+{
+  "format_version": 1,
+  "n_transitions": 31940,
+  "source_buffer_size": 200000,
+  "n_envs": 1,
+  "obs_shape": [
+    6
+  ],
+  "action_shape": [
+    1
+  ],
+  "buffer_class": "MirrorReplayBuffer",
+  "numpy_version": "1.26.4",
+  "fields": {
+    "observations": {
+      "dtype": "<f4",
+      "shape": [
+        31940,
+        1,
+        6
+      ]
+    },
+    "next_observations": {
+      "dtype": "<f4",
+      "shape": [
+        31940,
+        1,
+        6
+      ]
+    },
+    "actions": {
+      "dtype": "<f4",
+      "shape": [
+        31940,
+        1,
+        1
+      ]
+    },
+    "rewards": {
+      "dtype": "<f4",
+      "shape": [
+        31940,
+        1
+      ]
+    },
+    "dones": {
+      "dtype": "<f4",
+      "shape": [
+        31940,
+        1
+      ]
+    },
+    "timeouts": {
+      "dtype": "<f4",
+      "shape": [
+        31940,
+        1
+      ]
+    }
+  },
+  "obs_sign": [
+    -1.0,
+    -1.0,
+    1.0,
+    -1.0,
+    -1.0,
+    -1.0
+  ]
+}

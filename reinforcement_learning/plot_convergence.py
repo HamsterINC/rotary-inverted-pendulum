@@ -208,9 +208,9 @@ def main(argv: list[str] | None = None) -> int:
                                         "both"), default="frac_upright",
                    help="mean_abs_action_balanced = mean |action| over the balanced part "
                         "(control effort / chatter; NaN when the episode never balanced)")
-    p.add_argument("--smooth", type=int, default=5,
+    p.add_argument("--smooth", type=int, default=1,
                    help="rolling mean over N training episodes (1 = raw, default 5)")
-    p.add_argument("--max-episode", type=int, default=None,
+    p.add_argument("--max-episode", type=int, default=30,
                    help="cut the x-axis here (e.g. to the shortest platform's run)")
     p.add_argument("--show-runs", action="store_true",
                    help="also draw each run's own training curve, thin")

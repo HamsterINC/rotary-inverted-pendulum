@@ -209,7 +209,7 @@ class FpgaDeployClient:
 
     def __init__(
         self,
-        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/reinforcement_learning/Deploy/FPGA/deployment_sacs.xsa",
+        bitstream_path: str | Path = "/home/xilinx/jupyter_notebooks/RIP/rotary-inverted-pendulum/reinforcement_learning/Deploy/FPGA/deploy_model1.xsa",
         download: bool = True,
         weight_base: int | None = None,
         wait_for_arm: bool = True,
